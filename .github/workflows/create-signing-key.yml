@@ -1,0 +1,56 @@
+name: Create signing key (run once)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type CREATE to confirm. Only do this once.'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  create:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXISTING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - name: Refuse to replace an existing key
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "CREATE" ]; then
+            echo "::error::Type CREATE (capital letters) in the confirm box to continue."; exit 1
+          fi
+          if [ -n "$EXISTING_KEY" ]; then
+            echo "::error::A signing key already exists in your repository secrets. Making another one would stop new versions from installing over the old app. Delete the four ANDROID_ secrets first only if you really want a new key."; exit 1
+          fi
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Generate the key
+        run: |
+          set +x
+          mkdir -p signing-output
+          PASS=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 28)
+          echo "::add-mask::$PASS"
+          keytool -genkeypair -keystore signing-output/workoutapp-release.keystore -storetype PKCS12 \
+            -alias workoutapp -keyalg RSA -keysize 4096 -validity 36500 \
+            -storepass "$PASS" -keypass "$PASS" -dname "CN=WorkoutApp, O=Personal" > /dev/null 2>&1
+          base64 -w0 signing-output/workoutapp-release.keystore > signing-output/1-ANDROID_KEYSTORE_BASE64.txt
+          printf '%s' "$PASS" > signing-output/2-ANDROID_KEYSTORE_PASSWORD.txt
+          printf '%s' "workoutapp" > signing-output/3-ANDROID_KEY_ALIAS.txt
+          printf '%s' "$PASS" > signing-output/4-ANDROID_KEY_PASSWORD.txt
+          test -s signing-output/workoutapp-release.keystore
+
+      - name: Upload the key (private, kept 1 day)
+        uses: actions/upload-artifact@v6
+        with:
+          name: SIGNING-KEY-delete-after-use
+          path: signing-output/
+          if-no-files-found: error
+          retention-days: 1
