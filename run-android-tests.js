@@ -75,7 +75,7 @@ const out1 = path.join(tmp(), 'www'); let r = sh('node', ['build-www.js', '--out
 ok('build-www (lenient) succeeds without node_modules', r.code === 0, r.out.slice(-200));
 const idx = fs.existsSync(path.join(out1, 'index.html')) ? fs.readFileSync(path.join(out1, 'index.html'), 'utf8') : '';
 ok('index.html: Google Fonts links removed, local fonts.css added before style.css', !/googleapis|gstatic/.test(idx) && idx.indexOf('fonts.css') > -1 && idx.indexOf('fonts.css') < idx.indexOf('style.css'));
-ok('index.html: bridge script injected right after app.js, other scripts untouched', /<script src="app\.js"><\/script>\s*<script src="native-bridge\.js"><\/script>/.test(idx) && /icons\.js[\s\S]*data\.js[\s\S]*app\.js/.test(idx));
+ok('index.html: bridge script injected after app.js and Capacitor runtime, other scripts untouched', /<script src="app\.js"><\/script>\s*(?:<script src="capacitor\.js"><\/script>\s*)?<script src="native-bridge\.js"><\/script>/.test(idx) && /icons\.js[\s\S]*data\.js[\s\S]*app\.js/.test(idx));
 ok('app.js, data.js, icons.js are byte-identical to the tested web files', ['app.js', 'data.js', 'icons.js'].every((f) => md5(path.join(out1, f)) === md5(path.join(ROOT, f))));
 const css = fs.readFileSync(path.join(out1, 'style.css'), 'utf8');
 ok('style.css: all safe-area rules use Capacitor\'s variables with env() as fallback', !/[^(,]\benv\(safe-area/.test(css.replace(/var\(--safe-area-inset-\w+, env\(safe-area-inset-\w+, 0px\)\)/g, '')) && (css.match(/var\(--safe-area-inset-/g) || []).length === 4);
