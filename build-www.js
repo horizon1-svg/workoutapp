@@ -94,7 +94,8 @@ html = html.replace(/[ \t]*<link\b[^>]*fonts\.(?:googleapis|gstatic)\.com[^>]*>[
 const removedFontLinks = before !== html.length;
 const styleTag = /<link\b[^>]*href=["']style\.css["'][^>]*>/;
 html = styleTag.test(html) ? html.replace(styleTag, (t) => '<link rel="stylesheet" href="fonts.css">\n  ' + t) : html.replace('</head>', '  <link rel="stylesheet" href="fonts.css">\n</head>');
-const scripts = (runtime ? '\n  <script src="capacitor.js"></script>' : '') + '\n  <script src="native-bridge.js"></script>';
+const scripts = '\n  <script src="native-bridge.js"></script>' +
+  (runtime ? '\n  <script src="capacitor.js"></script>' : '');
 const appTag = /<script\b[^>]*src=["']app\.js["'][^>]*><\/script>/;
 if (!appTag.test(html)) fail('index.html has no <script src="app.js"> tag, so the bridge cannot be added after it.');
 html = html.replace(appTag, (t) => t + scripts);
