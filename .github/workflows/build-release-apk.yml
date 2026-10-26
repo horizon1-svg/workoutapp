@@ -1,0 +1,117 @@
+name: Build signed release APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      WA_VERSION_CODE: ${{ github.run_number }}
+      WA_VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - name: Check the signing secrets exist
+        run: |
+          missing=""
+          for v in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing GitHub secrets:$missing. Run the 'Create signing key' workflow first, then add the four secrets (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Get the project files
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform 36 and build tools
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          python3 -m pip install --quiet pillow numpy
+
+      - name: Run automated tests
+        run: npm test
+
+      - name: Build the web assets (www/)
+        run: node build-www.js
+
+      - name: Create the Android project
+        run: npx cap add android
+
+      - name: Decode the signing key
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.keystore" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::The signing key could not be opened with the stored password and alias. Check the four secrets."
+            exit 1
+          fi
+          echo "WA_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Apply WorkoutApp settings (icons, splash, portrait, signing)
+        run: |
+          python3 make-icons.py android/app/src/main/res logo.png
+          node patch-android.js release
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build the signed release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Check the APK and its signature
+        run: |
+          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          if [ -z "$APK" ] || [ ! -s "$APK" ]; then echo "::error::The build finished but no APK was produced"; exit 1; fi
+          mkdir -p dist
+          cp "$APK" dist/WorkoutApp-release.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -n 1)
+          "$APKSIGNER" verify --print-certs dist/WorkoutApp-release.apk > cert.txt
+          FP=$(grep -m1 "certificate SHA-256 digest" cert.txt | sed 's/.*: //')
+          echo "Signed. Certificate fingerprint (public): $FP"
+          echo "### Release APK built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Certificate SHA-256 (public, the same on every build if the key is the same): \`$FP\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download **WorkoutApp-release-apk** from the Artifacts section below." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: WorkoutApp-release-apk
+          path: dist/WorkoutApp-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Remove the decoded key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Show diagnostics (only if something failed)
+        if: failure()
+        run: |
+          echo "---- AndroidManifest.xml ----"; cat android/app/src/main/AndroidManifest.xml || true
+          echo "---- end of app/build.gradle (contains no secrets) ----"; tail -n 60 android/app/build.gradle || true
