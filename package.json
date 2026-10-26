@@ -1,0 +1,23 @@
+{
+  "name": "workoutapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WorkoutApp - personal fitness tracker packaged as an Android app with Capacitor",
+  "scripts": {
+    "test": "node run-tests.js && node run-android-tests.js",
+    "build:www": "node build-www.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/core": "^8.5.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
+    "@fontsource/cairo": "^5.0.0",
+    "@fontsource/sora": "^5.0.0"
+  }
+}

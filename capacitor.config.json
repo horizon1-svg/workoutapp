@@ -1,0 +1,20 @@
+{
+  "appId": "com.horizon.workoutapp",
+  "appName": "WorkoutApp",
+  "webDir": "www",
+  "backgroundColor": "#0b0b0d",
+  "server": {
+    "androidScheme": "https",
+    "hostname": "localhost"
+  },
+  "android": {
+    "backgroundColor": "#0b0b0d",
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SystemBars": {
+      "insetsHandling": "css",
+      "style": "DARK"
+    }
+  }
+}
