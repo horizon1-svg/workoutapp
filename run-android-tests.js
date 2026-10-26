@@ -81,7 +81,13 @@ const css = fs.readFileSync(path.join(out1, 'style.css'), 'utf8');
 ok('style.css: all safe-area rules use Capacitor\'s variables with env() as fallback', !/[^(,]\benv\(safe-area/.test(css.replace(/var\(--safe-area-inset-\w+, env\(safe-area-inset-\w+, 0px\)\)/g, '')) && (css.match(/var\(--safe-area-inset-/g) || []).length === 4);
 ok('www/ needs no internet: no http(s):// in html/css, only local files', ['index.html', 'style.css', 'fonts.css'].every((f) => !/https?:\/\//.test(fs.readFileSync(path.join(out1, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, ''))));
 ok('the web sources were not modified by the build', md5(path.join(ROOT, 'style.css')) === md5(path.join(ROOT, 'style.css')) && !/fonts\.css/.test(read('index.html')) && /googleapis/.test(read('index.html')));
-r = sh('node', ['build-www.js', '--out', path.join(tmp(), 'w')]); ok('strict build fails clearly when the font/runtime packages are not installed', r.code !== 0 && /npm install/.test(r.out));
+
+const strictProj = tmp();
+['index.html', 'style.css', 'app.js', 'data.js', 'icons.js', 'native-bridge.js', 'build-www.js'].forEach((f) => fs.copyFileSync(path.join(ROOT, f), path.join(strictProj, f)));
+r = sh('node', ['build-www.js', '--out', path.join(strictProj, 'w')], { cwd: strictProj });
+ok('strict build fails clearly when the font/runtime packages are not installed', r.code !== 0 && /npm install/.test(r.out));
+
+
 // full build against a fake @fontsource + @capacitor/core tree (mirrors the published file layout)
 const proj = tmp();
 ['index.html', 'style.css', 'app.js', 'data.js', 'icons.js', 'native-bridge.js', 'build-www.js'].forEach((f) => fs.copyFileSync(path.join(ROOT, f), path.join(proj, f)));
