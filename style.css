@@ -19,6 +19,11 @@
   --radius-full: 999px;
   --shadow-card: 0 10px 24px rgba(0, 0, 0, 0.35);
   --shadow-accent: 0 8px 22px rgba(229, 48, 63, 0.28);
+  --accent-glow: rgba(229, 48, 63, 0.55); /* glow around every timer ring; overridden per-theme in JS (red here = pre-JS fallback only) */
+  --scrim: rgba(0, 0, 0, 0.66); /* dim layer behind dialogs */
+  --scrim-soft: rgba(0, 0, 0, 0.55); /* dim layer behind the workout drawer */
+  --shadow-drawer: -12px 0 30px rgba(0, 0, 0, 0.4);
+  --nav-bg: rgba(14, 14, 17, 0.9); /* bottom navigation bar */
   --font: 'Sora', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
@@ -391,7 +396,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
   stroke: var(--accent);
   stroke-linecap: round;
   transition: stroke-dashoffset 0.3s linear;
-  filter: drop-shadow(0 0 8px rgba(229, 48, 63, 0.55));
+  filter: drop-shadow(0 0 8px var(--accent-glow));
 }
 .timer-readout {
   position: absolute;
@@ -674,7 +679,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -724,7 +729,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
 .drawer-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim-soft);
   z-index: 45;
   display: flex;
   justify-content: flex-end;
@@ -738,7 +743,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
   padding: 22px 16px calc(16px + env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-drawer);
 }
 .drawer-animate-in { animation: drawerSlideIn 0.24s ease; }
 @keyframes drawerSlideIn {
@@ -799,7 +804,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
   position: sticky;
   bottom: 0;
   display: flex;
-  background: rgba(11, 11, 13, 0.92);
+  background: var(--nav-bg);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--card-border);
   padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
@@ -824,6 +829,9 @@ h2 { font-size: 24px; margin-bottom: 18px; }
 /* ---------- Rest-screen motivational content ---------- */
 :root {
   --motiv-highlight: #f2e94e;
+  --motiv-highlight-text: #14140f; /* text on the yellow marker */
+  --motiv-stroke: #ffffff; /* line art of the rest-screen cards */
+  --motiv-axis: #4a4a4e;
 }
 .motiv-wrap {
   width: 100%;
@@ -839,7 +847,7 @@ h2 { font-size: 24px; margin-bottom: 18px; }
 }
 .motiv-highlight {
   background: var(--motiv-highlight);
-  color: #14140f;
+  color: var(--motiv-highlight-text);
   padding: 1px 6px;
   border-radius: 3px;
   font-weight: 700;
@@ -873,6 +881,8 @@ h2 { font-size: 24px; margin-bottom: 18px; }
 }
 .motiv-compare { width: 100%; max-width: 260px; }
 .motiv-compare-svg { width: 100%; height: auto; display: block; }
+.motiv-stroke { stroke: var(--motiv-stroke); } /* SVG line art follows the token, not a hard-coded attribute */
+.motiv-axis { stroke: var(--motiv-axis); }
 .motiv-compare-label {
   font-size: 10px;
   font-weight: 700;
@@ -949,7 +959,7 @@ h2 { font-size: 26px; letter-spacing: -0.02em; margin-bottom: 20px; }
 .primary-btn { background: linear-gradient(180deg, var(--accent), var(--accent-press)); }
 .primary-btn:active { background: var(--accent-press); }
 .phase-label { align-self: center; padding: 5px 14px; background: var(--accent-soft); color: var(--accent); border-radius: var(--radius-full); margin-bottom: 12px; }
-.overlay { background: rgba(0, 0, 0, 0.66); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.overlay { background: var(--scrim); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
 .overlay-card { animation: fadeInUp 0.22s ease; }
 
 /* Home */
@@ -959,7 +969,7 @@ h2 { font-size: 26px; letter-spacing: -0.02em; margin-bottom: 20px; }
 .session-card.rest-card { min-height: 0; justify-content: flex-start; }
 
 /* Bottom nav: pill highlight on the active tab */
-#bottom-nav { gap: 6px; background: rgba(14, 14, 17, 0.9); }
+#bottom-nav { gap: 6px; background: var(--nav-bg); }
 .nav-btn { border-radius: var(--radius-md); }
 .nav-btn.active { background: var(--accent-soft); }
 
