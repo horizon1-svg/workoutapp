@@ -50,12 +50,12 @@ const Store = (() => {
 })();
 
 // ---------- Random accent theme ----------
-// Only --accent/--accent-soft/--accent-press/--accent-text/--shadow-accent change; every other
+// Only --accent/--accent-soft/--accent-press/--accent-text/--shadow-accent/--accent-glow change; every other
 // token (background, card colors, text hierarchy, grayscale) is untouched by this.
 const ACCENT_THEMES = [
-  { name: 'red', accent: '#e5303f', soft: 'rgba(229, 48, 63, 0.14)', press: '#c72432', text: '#fff', shadow: 'rgba(229, 48, 63, 0.28)' },
-  { name: 'yellow', accent: '#e8b023', soft: 'rgba(232, 176, 35, 0.16)', press: '#c8961b', text: '#14140f', shadow: 'rgba(232, 176, 35, 0.30)' },
-  { name: 'blue', accent: '#3468f0', soft: 'rgba(52, 104, 240, 0.16)', press: '#2650c2', text: '#fff', shadow: 'rgba(52, 104, 240, 0.30)' },
+  { name: 'red', accent: '#e5303f', soft: 'rgba(229, 48, 63, 0.14)', press: '#c72432', text: '#fff', shadow: 'rgba(229, 48, 63, 0.28)', glow: 'rgba(229, 48, 63, 0.55)' },
+  { name: 'yellow', accent: '#e8b023', soft: 'rgba(232, 176, 35, 0.16)', press: '#c8961b', text: '#14140f', shadow: 'rgba(232, 176, 35, 0.30)', glow: 'rgba(232, 176, 35, 0.55)' },
+  { name: 'blue', accent: '#3468f0', soft: 'rgba(52, 104, 240, 0.16)', press: '#2650c2', text: '#fff', shadow: 'rgba(52, 104, 240, 0.30)', glow: 'rgba(52, 104, 240, 0.55)' },
 ];
 function applyAccentTheme(theme) {
   const r = document.documentElement.style;
@@ -64,6 +64,7 @@ function applyAccentTheme(theme) {
   r.setProperty('--accent-press', theme.press);
   r.setProperty('--accent-text', theme.text);
   r.setProperty('--shadow-accent', `0 8px 22px ${theme.shadow}`);
+  r.setProperty('--accent-glow', theme.glow || theme.shadow); // never leave the red :root fallback active under another accent
 }
 function initAccentTheme() {
   // Chosen once and persisted, so a refresh doesn't unexpectedly change the theme mid-session.
@@ -1975,7 +1976,7 @@ function motivArcsSvg(count, heights, y, width) {
   let paths = '';
   for (let i = 0; i < count; i++) {
     const x0 = i * segW, x1 = x0 + segW, midX = (x0 + x1) / 2, h = heights[i];
-    paths += `<path d="M${x0.toFixed(1)},${y} Q${midX.toFixed(1)},${(y - h).toFixed(1)} ${x1.toFixed(1)},${y}" fill="none" stroke="white" stroke-width="2"/>`;
+    paths += `<path d="M${x0.toFixed(1)},${y} Q${midX.toFixed(1)},${(y - h).toFixed(1)} ${x1.toFixed(1)},${y}" fill="none" class="motiv-stroke" stroke-width="2"/>`;
   }
   return paths;
 }
@@ -1985,21 +1986,21 @@ function renderMotivCompare(card) {
   const topArcs = motivArcsSvg(topCount, motivDecayHeights(topCount, 36), topH - 4, w);
   const bottomArcs = motivArcsSvg(bottomCount, Array(bottomCount).fill(18), bottomH - 4, w);
   return `<div class="motiv-compare">
-    <svg viewBox="0 0 ${w} ${topH}" class="motiv-compare-svg">${topArcs}<line x1="0" y1="${topH - 4}" x2="${w}" y2="${topH - 4}" stroke="#4a4a4e" stroke-width="1.5"/></svg>
+    <svg viewBox="0 0 ${w} ${topH}" class="motiv-compare-svg">${topArcs}<line x1="0" y1="${topH - 4}" x2="${w}" y2="${topH - 4}" class="motiv-axis" stroke-width="1.5"/></svg>
     <div class="motiv-compare-label">${card.topLabel}</div>
     <div class="motiv-compare-gap"></div>
-    <svg viewBox="0 0 ${w} ${bottomH}" class="motiv-compare-svg">${bottomArcs}<line x1="0" y1="${bottomH - 4}" x2="${w}" y2="${bottomH - 4}" stroke="#4a4a4e" stroke-width="1.5"/></svg>
+    <svg viewBox="0 0 ${w} ${bottomH}" class="motiv-compare-svg">${bottomArcs}<line x1="0" y1="${bottomH - 4}" x2="${w}" y2="${bottomH - 4}" class="motiv-axis" stroke-width="1.5"/></svg>
     <div class="motiv-compare-label">${card.bottomLabel}</div>
   </div>`;
 }
 function motivFigureSvg() {
   return `<svg viewBox="0 0 100 140" class="motiv-figure-svg">
-    <circle cx="50" cy="20" r="14" fill="none" stroke="white" stroke-width="2.5"/>
-    <line x1="50" y1="34" x2="50" y2="90" stroke="white" stroke-width="3" stroke-linecap="round"/>
-    <line x1="50" y1="46" x2="28" y2="80" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
-    <line x1="50" y1="46" x2="72" y2="80" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
-    <line x1="50" y1="90" x2="35" y2="135" stroke="white" stroke-width="3" stroke-linecap="round"/>
-    <line x1="50" y1="90" x2="65" y2="135" stroke="white" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="50" cy="20" r="14" fill="none" class="motiv-stroke" stroke-width="2.5"/>
+    <line x1="50" y1="34" x2="50" y2="90" class="motiv-stroke" stroke-width="3" stroke-linecap="round"/>
+    <line x1="50" y1="46" x2="28" y2="80" class="motiv-stroke" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="50" y1="46" x2="72" y2="80" class="motiv-stroke" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="50" y1="90" x2="35" y2="135" class="motiv-stroke" stroke-width="3" stroke-linecap="round"/>
+    <line x1="50" y1="90" x2="65" y2="135" class="motiv-stroke" stroke-width="3" stroke-linecap="round"/>
   </svg>`;
 }
 

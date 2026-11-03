@@ -415,5 +415,61 @@ ok('hub/preset CSS: theme variables only, no hard-coded colors', !/#[0-9a-fA-F]{
 ok('hub/preset CSS: narrow-screen safe (minmax(0,1fr) tab grid, ellipsis, flexible buttons)', /hub-tabs \{[^}]*minmax\(0, 1fr\)/.test(tail2) && /\.hub-tab span \{[^}]*text-overflow: ellipsis/.test(tail2) && /\.qs-btn \{[^}]*min-width: 0/.test(tail2));
 ok('no browser alert/prompt/confirm used for editing', !/\b(alert|prompt|confirm)\(/.test(appSrc));
 
+// =====================================================================
+console.log('\n== 7. THEME ENGINE (phase 1): one central source, no hard-coded accent effects ==');
+{
+  const themes = run(make(NOW), 'ACCENT_THEMES.map((t) => Object.assign({}, t))');
+  const rgbOf = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ');
+  const glowRgb = (g) => (/^rgba\((\d+), (\d+), (\d+), ([\d.]+)\)$/.exec(g) || []).slice(1, 4).join(', ');
+  const spyApply = (theme) => { const cc = make(NOW), props = {}; cc.document.documentElement.style.setProperty = (k, v) => { props[k] = v; }; run(cc, 'applyAccentTheme(' + J(theme) + ')'); return props; };
+
+  ok('the three existing themes are still red, yellow and blue (same order)', J(themes.map((t) => t.name)) === '["red","yellow","blue"]');
+  ok('every theme defines its own glow, and no two themes share one', themes.every((t) => typeof t.glow === 'string') && new Set(themes.map((t) => t.glow)).size === themes.length);
+  ok('each glow is the theme accent colour (same RGB as accent)', themes.every((t) => glowRgb(t.glow) === rgbOf(t.accent)), J(themes.map((t) => [t.name, glowRgb(t.glow), rgbOf(t.accent)])));
+  for (const t of themes) {
+    const p = spyApply(t);
+    ok('applying "' + t.name + '" sets accent, soft, press, text, shadow and glow from that theme only',
+      p['--accent'] === t.accent && p['--accent-soft'] === t.soft && p['--accent-press'] === t.press && p['--accent-text'] === t.text && p['--shadow-accent'].includes(t.shadow) && p['--accent-glow'] === t.glow, J(p));
+    if (t.name !== 'red') ok('"' + t.name + '" has no red (229, 48, 63) anywhere in what it applies', !Object.values(p).some((v) => v.includes('229, 48, 63') || v.toLowerCase().includes('#e5303f')), J(p));
+  }
+  const noGlow = spyApply({ name: 'x', accent: '#00aa00', soft: 'rgba(0, 170, 0, 0.16)', press: '#008800', text: '#fff', shadow: 'rgba(0, 170, 0, 0.30)' });
+  ok('a theme without glow falls back to its own shadow colour, never the red default', noGlow['--accent-glow'] === 'rgba(0, 170, 0, 0.30)');
+
+  // persistence: the saved theme is re-applied on start, glow included
+  for (const t of themes) {
+    const cc = make(NOW), props = {}; cc.document.documentElement.style.setProperty = (k, v) => { props[k] = v; };
+    run(cc, "Store.set('accentTheme','" + t.name + "'); initAccentTheme()");
+    ok('saved theme "' + t.name + '" is restored at startup with its glow', props['--accent-glow'] === t.glow && props['--accent'] === t.accent);
+  }
+  // backup round trip: the theme name is exported and, on import, re-applied together with its glow
+  { const cc = make(NOW); run(cc, "Store.set('accentTheme','blue')"); const bk = run(cc, 'buildBackup()');
+    ok('backup still carries the accent theme name unchanged', JSON.parse(bk).data.accentTheme === 'blue');
+    const cc2 = make(NOW), props = {}; cc2.document.documentElement.style.setProperty = (k, v) => { props[k] = v; };
+    cc2.setField('import-input', bk); run(cc2, "state.screen='settings';state.importOpen=true;applyImport();commitImport()");
+    const blue = themes.find((t) => t.name === 'blue');
+    ok('importing a backup re-applies its theme with the matching glow', run(cc2, "Store.get('accentTheme')") === 'blue' && props['--accent-glow'] === blue.glow, J(props)); }
+
+  // static scan of the stylesheet
+  const cssAll = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const outsideRoot = cssAll.replace(/:root\s*\{[^}]*\}/g, '');
+  ok('style.css: no hex colour outside :root (every colour is a token)', !/#[0-9a-fA-F]{3,8}\b/.test(outsideRoot), (outsideRoot.match(/#[0-9a-fA-F]{3,8}\b/g) || []).join(','));
+  ok('style.css: no rgb()/rgba() literal outside :root', !/rgba?\(/.test(outsideRoot), (outsideRoot.match(/rgba?\([^)]*\)/g) || []).join(' | '));
+  ok('style.css: the red accent value appears only in :root defaults', !/229,\s*48,\s*63|e5303f|c72432/i.test(outsideRoot));
+  const ringRule = (/\.ring-progress\s*\{[^}]*\}/.exec(cssAll) || [''])[0];
+  ok('timer ring glow comes from --accent-glow (no literal colour)', /drop-shadow\(0 0 8px var\(--accent-glow\)\)/.test(ringRule) && !/rgba?\(|#[0-9a-f]{3,8}/i.test(ringRule), ringRule);
+  ok('the effective overlay and bottom-nav backgrounds still resolve to the same values as before', /--scrim:\s*rgba\(0, 0, 0, 0\.66\)/.test(cssAll) && /--nav-bg:\s*rgba\(14, 14, 17, 0\.9\)/.test(cssAll) && /\.overlay \{ background: var\(--scrim\)/.test(cssAll) && /#bottom-nav \{ gap: 6px; background: var\(--nav-bg\)/.test(cssAll));
+  const declared = new Set([...cssAll.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const appJs = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+  [...appJs.matchAll(/setProperty\('(--[a-z0-9-]+)'/g)].forEach((m) => declared.add(m[1]));
+  const usedVars = [...new Set([...cssAll.matchAll(/var\((--[a-z0-9-]+)/g)].map((m) => m[1]))];
+  const undefinedVars = usedVars.filter((v) => !declared.has(v));
+  ok('every var(--token) used in style.css is declared in CSS or set by JS (no typos / dangling tokens)', undefinedVars.length === 0, undefinedVars.join(','));
+  ok('app.js: no hard-coded colour attributes in SVG markup (stroke/fill white or hex)', !/(?:stroke|fill)="(?:white|#[0-9a-fA-F]{3,8})"/.test(appJs));
+  ok('rest-screen line art uses the motiv-stroke / motiv-axis classes, defined as tokens', /class="motiv-stroke"/.test(appJs) && /class="motiv-axis"/.test(appJs) && /\.motiv-stroke \{ stroke: var\(--motiv-stroke\); \}/.test(cssAll) && /\.motiv-axis \{ stroke: var\(--motiv-axis\); \}/.test(cssAll));
+  const ring = run(make(NOW), 'ringSvg(90,180)');
+  ok('ring markup carries no inline colour or filter (glow is theme-driven)', /class="ring-progress"/.test(ring) && !/style=|filter|stroke="#|rgba?\(/.test(ring));
+  ok('warm-up, set timer and rest all draw their ring through the same timerBlock/ringSvg', ['renderWarmup', 'renderActive', 'renderRest'].every((f) => run(make(NOW), f + '.toString()').includes('timerBlock(')));
+}
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 if (fail) { console.log('\nFAILED:\n- ' + failures.join('\n- ')); process.exit(1); }
