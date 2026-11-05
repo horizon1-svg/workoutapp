@@ -42,9 +42,11 @@ ok('native: the leave-workout dialog is registered on the app\'s own confirm sys
 back(c); ok('Home: first Back shows a hint and does NOT exit', c.toasts.includes('PRESS BACK AGAIN TO EXIT') && c.exitCount() === 0);
 c.advance(500); back(c); ok('Home: second Back within 2 s exits the app', c.exitCount() === 1);
 c = make(); back(c); c.advance(3500); back(c); ok('Home: a second Back after 2 s only shows the hint again', c.exitCount() === 0 && c.toasts.length === 2);
-const ENTER = { history: 'goHistory()', settings: 'goSettings()', progress: 'goProgress()', advancedSettings: 'goAdvancedSettings()', customMods: 'goCustomMods()' }; // the app's own navigation functions
+const ENTER = { history: 'goHistory()', settings: 'goSettings()', progress: 'goProgress()', advancedSettings: 'goAdvancedSettings()', customMods: 'goCustomMods()', themeStudio: 'goThemeStudio()', themeAdvanced: 'goThemeAdvanced()' }; // the app's own navigation functions
 for (const s of ['history', 'settings', 'progress']) { c = make(); run(c, ENTER[s]); back(c); ok(s + ': Back returns to Home', scr(c) === 'home' && c.exitCount() === 0); }
-for (const s of ['advancedSettings', 'customMods']) { c = make(); run(c, ENTER[s]); back(c); ok(s + ': Back returns to Settings', scr(c) === 'settings'); }
+for (const s of ['advancedSettings', 'customMods', 'themeStudio']) { c = make(); run(c, ENTER[s]); back(c); ok(s + ': Back returns to Settings', scr(c) === 'settings'); }
+c = make(); run(c, ENTER.themeAdvanced); back(c); ok('themeAdvanced: Back returns to Theme Studio (not Home)', scr(c) === 'themeStudio'); back(c); ok('themeStudio (after Advanced): Back returns to Settings', scr(c) === 'settings');
+c = make(); run(c, ENTER.themeStudio + ";studioSelect('p:purple')"); ok('Theme Studio: a previewed theme is not stored', c.store.wa_theme === undefined && run(c, 'studioPreviewing()') === true); back(c); ok('Theme Studio: Back drops the unsaved draft', scr(c) === 'settings' && run(c, 'state.studio') === null && c.store.wa_theme === undefined);
 c = make(); run(c, "selectSession('PUSH_A')"); back(c); ok('Setup: Back returns to Home', scr(c) === 'home');
 c = make(); run(c, "selectSession('PUSH_A');state.screen='complete';state.lastSummary={}"); back(c); ok('Complete: Back returns to Home', scr(c) === 'home');
 // overlays close before anything else happens
