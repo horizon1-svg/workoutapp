@@ -35,7 +35,8 @@
     if (state.drawerOpen) { toggleDrawer(); return 'handled'; }
     var s = state.screen;
     if (WORKOUT_SCREENS[s]) { state.confirmAction = { kind: 'leaveWorkout' }; render(); return 'handled'; }
-    if (s === 'advancedSettings' || s === 'customMods') { goSettings(); return 'handled'; }
+    if (s === 'themeAdvanced') { themeBackToBasic(); return 'handled'; } // Advanced theme -> Theme Studio (the unsaved draft is kept)
+    if (s === 'advancedSettings' || s === 'customMods' || s === 'themeStudio') { goSettings(); return 'handled'; } // leaving Theme Studio drops an unsaved draft
     if (s !== 'home') { goHome(); return 'handled'; }
     var now = Date.now();
     if (now - lastBackAt < EXIT_WINDOW_MS) return 'exit';
