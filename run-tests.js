@@ -118,7 +118,7 @@ c.setField('import-input', good); run(c, "state.importOpen=true;applyImport()");
 ok('valid import shows a preview and changes NOTHING yet', J(c.store) === snapshot && run(c, 'state.importPreview.report.records') === 2 && run(c, 'state.importPreview.report.skipped') === 5 && run(c, 'renderImportPreview()').includes('REPLACE MY DATA'));
 run(c, 'backToImportEdit()'); ok('going back keeps data untouched', J(c.store) === snapshot);
 run(c, 'applyImport()'); run(c, 'commitImport()');
-ok('confirmed import replaces matching data, deduped and newest-first', run(c, "Store.get('history').map(h=>h.date).join()") === '2026-09-02,2026-09-01' && run(c, "Store.get('schemaVersion')") === 4);
+ok('confirmed import replaces matching data, deduped and newest-first', run(c, "Store.get('history').map(h=>h.date).join()") === '2026-09-02,2026-09-01' && run(c, "Store.get('schemaVersion')") === 5);
 // backup roundtrip incl. condensed history
 c = make(NOW); seed(c, many); run(c, "saveHistoryEntry(Object.assign({}, validHistory()[0], {date:'2026-10-14', startedAt: 1}))"); c.store.wa_history = J(run(c, "Store.get('history')").filter((h) => h.startedAt !== 1));
 const a1 = agg(c), bk = run(c, 'buildBackup()'); let c4 = make(NOW); c4.setField('import-input', bk); run(c4, "state.screen='settings';state.importOpen=true;applyImport();commitImport()");
@@ -388,8 +388,8 @@ ok('EXERCISE_DB is still untouched after all hub/preset operations', J(run(um, '
 ok('history entries are unchanged by presets, session saves and resets', hm.store.wa_history === histSnap && dm.store.wa_history === dHist);
 // UI consistency (the redesigned components share one language)
 const settingsHtml = run(make(NOW), 'renderSettings()');
-ok('Settings: new entries use the same row card as the toggles (no stray ghost/action-card buttons), grouped under titles', (settingsHtml.match(/class="settings-row"/g) || []).length === 3 && (settingsHtml.match(/class="settings-row link"/g) || []).length === 4 && !settingsHtml.includes('ghost-btn') && !settingsHtml.includes('action-card') && ['PREFERENCES', 'WORKOUT', 'DATA'].every((g) => settingsHtml.includes('settings-group-title">' + g)) && settingsHtml.includes('CUSTOMIZATION') && balanced(settingsHtml));
-ok('Settings: every link row triggers its action', ['goAdvancedSettings()', 'goCustomMods()', 'exportData()', 'openImport()'].every((f) => settingsHtml.includes('onclick="' + f + '"')));
+ok('Settings: new entries use the same row card as the toggles (no stray ghost/action-card buttons), grouped under titles', (settingsHtml.match(/class="settings-row"/g) || []).length === 3 && (settingsHtml.match(/class="settings-row link"/g) || []).length === 5 && !settingsHtml.includes('ghost-btn') && !settingsHtml.includes('action-card') && ['PREFERENCES', 'APPEARANCE', 'WORKOUT', 'DATA'].every((g) => settingsHtml.includes('settings-group-title">' + g)) && settingsHtml.includes('CUSTOMIZATION') && balanced(settingsHtml));
+ok('Settings: every link row triggers its action', ['goThemeStudio()', 'goAdvancedSettings()', 'goCustomMods()', 'exportData()', 'openImport()'].every((f) => settingsHtml.includes('onclick="' + f + '"')));
 let ui = make(NOW); run(ui, "selectSession('PUSH_A');openEdit(0)"); ui.setField('edit-name', 'Push-ups'); run(ui, "editStep('sets',-1);saveEditCustom();openAdd()"); ui.setField('edit-name', 'Pike Push-ups'); run(ui, 'saveEditCustom();changeSets(2,1)');
 const setupUi = run(ui, 'renderSetup()');
 ok('Setup rows: status flags sit inline on the target line (no separate hanging block)', /<div class="exercise-target"><span>15 REPS<\/span><span class="flag flag-saved">CUSTOM<\/span><\/div>/.test(setupUi) && /<span class="flag flag-temp">THIS WORKOUT ONLY<\/span><\/div>/.test(setupUi) && /<span class="flag flag-added">ADDED<\/span><\/div>/.test(setupUi) && !setupUi.includes('exercise-flags'));
@@ -469,6 +469,262 @@ console.log('\n== 7. THEME ENGINE (phase 1): one central source, no hard-coded a
   const ring = run(make(NOW), 'ringSvg(90,180)');
   ok('ring markup carries no inline colour or filter (glow is theme-driven)', /class="ring-progress"/.test(ring) && !/style=|filter|stroke="#|rgba?\(/.test(ring));
   ok('warm-up, set timer and rest all draw their ring through the same timerBlock/ringSvg', ['renderWarmup', 'renderActive', 'renderRest'].every((f) => run(make(NOW), f + '.toString()').includes('timerBlock(')));
+}
+
+// =====================================================================
+console.log('\n== 8. THEME STUDIO (phase 2): presets, validation, preview, save/cancel, storage, backup ==');
+{
+  const T8 = (store) => { const cc = make(NOW, Object.assign({}, store || {})), props = {}, cls = {}, el = cc.document.documentElement;
+    el.style.setProperty = (k, v) => { props[k] = v; }; el.classList = { add: (x) => { cls[x] = true; }, remove: (x) => { delete cls[x]; } };
+    return { cc, props, cls }; };
+  const RED = { wa_accentTheme: J('red') };
+  const copyStore = (cc) => JSON.parse(J(cc.store));
+  const toast = (cc) => cc.toasts[cc.toasts.length - 1];
+  const D = run(make(NOW), 'Object.assign({}, DEFAULT_TOKENS)');
+  const css8 = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const trainKeys = ['wa_history', 'wa_exerciseMods', 'wa_customExercises', 'wa_settings'];
+  const trainSnap = (cc) => J(trainKeys.map((k) => cc.store[k]));
+
+  // ---- presets: order, original values, new ones ----
+  const presets = run(make(NOW), 'THEME_PRESETS.map((p) => ({ id: p.id, label: p.label, t: Object.assign({}, p.tokens) }))');
+  const legacy = run(make(NOW), 'ACCENT_THEMES.map((t) => Object.assign({}, t))');
+  ok('8 presets: Red, Yellow, Blue keep their order, then Purple, Emerald, Cyan, Orange, Rose', J(presets.map((p) => p.id)) === '["red","yellow","blue","purple","emerald","cyan","orange","rose"]');
+  ok('Red, Yellow and Blue carry exactly their original accent values', presets.slice(0, 3).every((p, i) => p.t.accent === legacy[i].accent && p.t.accentPress === legacy[i].press && p.t.accentText === (legacy[i].text === '#fff' ? '#ffffff' : legacy[i].text)));
+  presets.forEach((p) => {
+    const v = run(make(NOW), "validateTheme(THEME_PRESETS.find((x) => x.id === '" + p.id + "').tokens)");
+    ok('preset "' + p.id + '" is valid with no readability warnings', v.ok && v.warnings.length === 0, J(v));
+    ok('preset "' + p.id + '" starts with Glass off and the current blur values (6px / 10px)', p.t.glass === false && p.t.blurOverlay === 6 && p.t.blurNav === 10);
+    if (p.id !== 'red') { const t = T8(RED); run(t.cc, "applyThemeTokens(THEME_PRESETS.find((x) => x.id === '" + p.id + "').tokens, false)");
+      ok('preset "' + p.id + '" applies no red anywhere', !Object.values(t.props).some((x) => /229, 48, 63|#e5303f|#c72432/i.test(x))); }
+  });
+  { // the design must not change: applying Red reproduces the stylesheet defaults exactly
+    const rootDecl = {};
+    [...css8.matchAll(/:root\s*\{([^}]*)\}/g)].forEach((m) => [...m[1].matchAll(/(--[a-z0-9-]+):\s*([^;]+);/g)].forEach((d) => { rootDecl[d[1]] = d[2].trim(); }));
+    const nv = (v) => v.toLowerCase().replace(/\s+/g, ' ').replace(/^#fff$/, '#ffffff');
+    const t = T8(RED); run(t.cc, 'applyThemeTokens(THEME_PRESETS[0].tokens, false)');
+    const mism = Object.keys(t.props).filter((k) => rootDecl[k] === undefined || nv(t.props[k]) !== nv(rootDecl[k]));
+    ok('applying Red sets all ' + Object.keys(t.props).length + ' variables to exactly the stylesheet defaults (the app looks the same)', mism.length === 0 && Object.keys(t.props).length >= 20, J(mism.map((k) => [k, t.props[k], rootDecl[k]])));
+  }
+
+  // ---- HEX and value validation ----
+  const nh = (v) => run(make(NOW), 'normHex(' + J(v) + ')');
+  ok('HEX accepted and normalised: #fff, FFF, #E5303F, " #abc ", e5303f', nh('#fff') === '#ffffff' && nh('FFF') === '#ffffff' && nh('#E5303F') === '#e5303f' && nh(' #abc ') === '#aabbcc' && nh('e5303f') === '#e5303f');
+  ok('HEX rejected: empty, short, long, non-hex, names, numbers, null, markup', ['', '#12', '#12345', '#1234567', '#gggggg', 'red', 'rgb(1,2,3)', 123, null, undefined, '<script>alert(1)</script>', '#ff00zz'].every((v) => nh(v) === null));
+  const vt = (patch) => run(make(NOW), 'validateTheme(Object.assign({}, DEFAULT_TOKENS, ' + J(patch) + '))');
+  ok('the default theme is valid with no warnings', vt({}).ok && vt({}).warnings.length === 0);
+  ok('light backgrounds and surfaces are rejected with a clear reason', ['bg', 'bgTop', 'card', 'cardTop', 'track', 'navBg'].every((k) => { const r = vt({ [k]: '#ffffff' }); return !r.ok && r.errors.some((e) => e.code === 'LIGHT' && /dark/i.test(e.text)); }) && vt({ bg: '#777777' }).errors.some((e) => e.code === 'LIGHT'));
+  ok('the dark limit is a luminance ceiling: a dark grey passes it, a light grey does not', !vt({ card: '#2a2a2e' }).errors.some((e) => e.code === 'LIGHT') && vt({ card: '#808080' }).errors.some((e) => e.code === 'LIGHT'));
+  ok('contrast below 3:1 is rejected (text, secondary text, text on accent, accent on surface)', !vt({ text: '#2a2a2a' }).ok && vt({ text: '#2a2a2a' }).errors.some((e) => e.code === 'CONTRAST') && !vt({ textSecondary: '#1f1f22' }).ok && !vt({ accentText: '#e5303f' }).ok && !vt({ accent: '#111111', glowColor: '#111111' }).ok);
+  let grey = null;
+  { const cc = make(NOW); for (let g = 0x60; g < 0xf0 && !grey; g++) { const hx = '#' + g.toString(16).padStart(2, '0').repeat(3), r = run(cc, "contrastRatio('" + hx + "', '#1a1a1d')"); if (r >= 3.3 && r < 4.2) grey = hx; } }
+  ok('a test grey between 3:1 and 4.5:1 exists for the warning band', !!grey, grey);
+  const warnR = vt({ text: grey });
+  ok('contrast from 3:1 up to 4.5:1 is allowed but warns (with the ratio and the 4.5:1 target)', warnR.ok && warnR.warnings.length >= 1 && /below the recommended 4\.5:1/.test(warnR.warnings[0].text) && /\d\.\d:1/.test(warnR.warnings[0].text));
+  ok('4.5:1 or more: accepted with no warning (default text is above 15:1)', vt({}).warnings.length === 0);
+  ok('the original Red does not warn (its white-on-red is 4.35:1: accent pairs only reject below 3:1)', run(make(NOW), 'validateTheme(THEME_PRESETS[0].tokens)').warnings.length === 0);
+  ok('invalid values are rejected: alpha out of range, NaN, text, px non-integer or out of range, wrong boolean type', [{ accentSoft: 0.9 }, { glowAlpha: -1 }, { borderAlpha: 'x' }, { navAlpha: 0.1 }, { blurNav: 2.5 }, { blurOverlay: 99 }, { glassBlur: 0 }, { glass: 'yes' }, { accent: 'red' }, { cardShadow: 5 }].every((p) => !vt(p).ok));
+  ok('relative luminance / contrast math: black on white is 21:1, same colour is 1:1', Math.abs(run(make(NOW), "contrastRatio('#000000', '#ffffff')") - 21) < 0.01 && Math.abs(run(make(NOW), "contrastRatio('#336699', '#336699')") - 1) < 0.001);
+
+  // ---- preview is temporary; nothing is stored until SAVE; leaving restores the saved theme ----
+  { const t = T8(RED); run(t.cc, 'goThemeStudio()');
+    const snap = J(t.cc.store);
+    run(t.cc, "studioSelect('p:purple')");
+    ok('previewing a preset applies it live but writes NOTHING to storage', t.props['--accent'] === '#7c4dff' && J(t.cc.store) === snap && run(t.cc, 'studioPreviewing()') === true && run(t.cc, 'renderThemeStudio()').includes('PREVIEW \u00b7 NOT SAVED'));
+    run(t.cc, "goThemeAdvanced(); studioSetColor('text', '#eeeeee')");
+    ok('advanced edits are previewed and not stored either', t.props['--text'] === '#eeeeee' && J(t.cc.store) === snap);
+    run(t.cc, 'studioCancel()');
+    ok('CANCEL drops the draft and brings back the last saved theme (Red)', run(t.cc, 'state.screen') === 'settings' && run(t.cc, 'state.studio') === null && t.props['--accent'] === '#e5303f' && t.props['--text'] === '#f2f2f0' && J(t.cc.store) === snap);
+    for (const leave of ['goHome()', 'goHistory()', 'goProgress()', 'goSettings()']) {
+      const u = T8(RED); run(u.cc, "goThemeStudio(); studioSelect('p:cyan')"); const before = J(u.cc.store); run(u.cc, leave);
+      ok('leaving the studio with ' + leave + ' also restores the saved theme without saving', u.props['--accent'] === '#e5303f' && run(u.cc, 'state.studio') === null && J(u.cc.store) === before);
+    }
+  }
+  // ---- save: built-in presets, custom copies ----
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:emerald'); studioSave()");
+    const st = JSON.parse(t.cc.store.wa_theme);
+    ok('SAVE of an unchanged preset makes it the active theme (no custom copy)', st.active === 'p:emerald' && st.customs.length === 0 && t.props['--accent'] === '#10b981' && run(t.cc, 'studioPreviewing()') === false && toast(t.cc) === 'THEME SAVED');
+    ok('a new-style preset keeps a valid legacy accent for older app versions', JSON.parse(t.cc.store.wa_accentTheme) === 'red');
+    run(t.cc, "studioSelect('p:blue'); studioSave()");
+    ok('saving Blue (one of the original three) mirrors the legacy accentTheme key', JSON.parse(t.cc.store.wa_accentTheme) === 'blue' && JSON.parse(t.cc.store.wa_theme).active === 'p:blue');
+  }
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:blue'); goThemeAdvanced(); studioSetColor('glowColor', '#22aacc')"); t.cc.setField('studio-name', 'My teal');
+    const blueBefore = J(presets[2].t);
+    run(t.cc, 'studioSave()');
+    const st = JSON.parse(t.cc.store.wa_theme), c = st.customs[0];
+    ok('editing a built-in theme saves a CUSTOM copy and makes it active', st.customs.length === 1 && c.name === 'My teal' && c.from === 'blue' && st.active === 'c:' + c.id && c.tokens.glowColor === '#22aacc');
+    ok('the original built-in theme is never changed', J(run(t.cc, "THEME_PRESETS.find((x) => x.id === 'blue').tokens")) === blueBefore && J(run(t.cc, "THEME_PRESETS[2].tokens")) === blueBefore);
+    ok('the custom theme is applied', t.props['--accent-glow'] === 'rgba(34, 170, 204, 0.55)' && t.props['--accent'] === '#3468f0');
+    run(t.cc, "studioSelect('c:" + c.id + "'); goThemeAdvanced(); studioSetColor('glowColor', '#aa44cc')"); t.cc.setField('studio-name', 'Renamed'); run(t.cc, 'studioSave()');
+    const st2 = JSON.parse(t.cc.store.wa_theme);
+    ok('SAVE on a custom theme updates it in place (no extra copy) and can rename it', st2.customs.length === 1 && st2.customs[0].name === 'Renamed' && st2.customs[0].tokens.glowColor === '#aa44cc' && st2.customs[0].id === c.id);
+  }
+  // ---- naming and the 5-theme limit ----
+  { const t = T8(RED); run(t.cc, 'goThemeStudio()');
+    const accents = ['#22aa77', '#2299dd', '#dd8822', '#aa44cc', '#cc3366'];
+    accents.forEach((a, i) => { run(t.cc, "studioSelect('p:red'); studioBasicAccent('" + a + "')"); t.cc.setField('studio-name', 'Theme ' + (i + 1)); run(t.cc, 'studioSave()'); });
+    ok('up to 5 custom themes can be saved', JSON.parse(t.cc.store.wa_theme).customs.length === 5);
+    run(t.cc, "studioSelect('p:red'); studioBasicAccent('#44aadd')"); t.cc.setField('studio-name', 'Sixth'); const beforeSix = t.cc.store.wa_theme; run(t.cc, 'studioSave()');
+    ok('a 6th is refused with a clear message and nothing is stored', toast(t.cc) === 'LIMIT: 5 CUSTOM THEMES' && t.cc.store.wa_theme === beforeSix);
+    run(t.cc, "studioSelect('c:" + JSON.parse(t.cc.store.wa_theme).customs[0].id + "'); studioBasicAccent('#33bb88')"); t.cc.setField('studio-name', 'Theme 1'); run(t.cc, 'studioSave()');
+    ok('editing an existing custom theme still works at the limit', toast(t.cc) === 'THEME SAVED' && JSON.parse(t.cc.store.wa_theme).customs.length === 5);
+    run(t.cc, "studioSelect('p:red'); studioBasicAccent('#44aadd')");
+    t.cc.setField('studio-name', 'theme 3'); run(t.cc, 'studioSave()'); ok('duplicate names are refused (case-insensitive)', toast(t.cc) === 'NAME ALREADY USED');
+  }
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:red'); studioBasicAccent('#22aa77')");
+    t.cc.setField('studio-name', 'Purple'); run(t.cc, 'studioSave()'); ok('a name equal to a built-in theme is refused', toast(t.cc) === 'NAME ALREADY USED' && t.cc.store.wa_theme === undefined);
+    t.cc.setField('studio-name', '   '); run(t.cc, 'studioSave()'); ok('an empty name is refused', toast(t.cc) === 'ENTER A NAME' && t.cc.store.wa_theme === undefined);
+    t.cc.setField('studio-name', '<b>Evil "name"</b> that is way too long to keep'); run(t.cc, 'studioSave()');
+    const nm = JSON.parse(t.cc.store.wa_theme).customs[0].name;
+    ok('names are sanitised (no markup characters) and limited to 20 characters', nm.length <= 20 && !/[<>"&]/.test(nm) && nm.length > 0, nm);
+    ok('the name is escaped wherever it is shown', !run(t.cc, 'renderThemeStudio()').includes('<b>Evil'));
+  }
+  // ---- wrong values never break the app ----
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); goThemeAdvanced()");
+    const draft0 = J(run(t.cc, 'state.studio.draft'));
+    ['', '#12', 'zzz', 'red', '<img src=x onerror=alert(1)>', '#1234567', null].forEach((v) => { run(t.cc, 'studioSetColor("accent", ' + J(v) + ')'); });
+    ok('invalid HEX input is rejected with a message and the draft is unchanged', J(run(t.cc, 'state.studio.draft')) === draft0 && /Invalid color/.test(run(t.cc, 'state.studio.msg')) && toast(t.cc) === 'INVALID COLOR');
+    run(t.cc, "studioSetColor('bg', '#ffffff')");
+    ok('a light background is refused with a clear explanation (dark only, system bars)', run(t.cc, 'state.studio.draft.bg') === '#0b0b0d' && /too light/i.test(run(t.cc, 'state.studio.msg')) && /system bars/i.test(run(t.cc, 'state.studio.msg')) && toast(t.cc) === 'TOO LIGHT \u00b7 DARK ONLY');
+    ok('the explanation is shown on screen', run(t.cc, 'renderThemeAdvanced()').includes('too light'));
+    run(t.cc, "studioSetColor('card', '#999999')"); ok('a light surface is refused too', run(t.cc, 'state.studio.draft.card') === '#1a1a1d');
+    run(t.cc, "studioSetColor('text', '#2a2a2a')"); ok('unreadable text is refused (below 3:1) and the draft keeps the last readable value', run(t.cc, 'state.studio.draft.text') === '#f2f2f0' && /3:1/.test(run(t.cc, 'state.studio.msg')) && toast(t.cc) === 'LOW CONTRAST');
+    ok('the live app was never switched to a rejected value', t.props['--bg'] !== '#ffffff' && t.props['--text'] !== '#2a2a2a');
+    run(t.cc, "studioSetColor('text', '" + grey + "')");
+    ok('a borderline text colour is accepted and the warning is shown', run(t.cc, 'state.studio.draft.text') === grey && run(t.cc, 'renderThemeAdvanced()').includes('below the recommended 4.5:1') && t.props['--text'] === grey);
+    t.cc.setField('studio-name', 'Dim text'); run(t.cc, 'studioSave()');
+    ok('...and it can be saved (3:1 up to 4.5:1 is allowed)', JSON.parse(t.cc.store.wa_theme).customs.length === 1);
+    const forced = T8(RED); run(forced.cc, "goThemeStudio(); state.studio.draft = Object.assign({}, state.studio.draft, { text: '#202020' }); studioSave()");
+    ok('SAVE re-checks: a draft that somehow became unreadable is refused', forced.cc.store.wa_theme === undefined && /CANNOT SAVE/.test(toast(forced.cc)));
+    run(t.cc, "studioBasicAccent('#101010')"); ok('Basic accent: an accent too dark for the surfaces is refused', run(t.cc, 'state.studio.draft.accent') !== '#101010');
+  }
+  // ---- Basic accent picker ----
+  { const t = T8(RED); run(t.cc, 'goThemeStudio()'); const snap = J(t.cc.store);
+    run(t.cc, "studioBasicAccent('#ff8800')");
+    const d = run(t.cc, 'state.studio.draft');
+    ok('Basic accent sets the accent and derives pressed colour, glow colour and readable button text', d.accent === '#ff8800' && d.glowColor === '#ff8800' && d.accentPress !== d.accent && /^#[0-9a-f]{6}$/.test(d.accentPress) && run(t.cc, 'validateTheme(state.studio.draft)').ok && run(t.cc, "contrastRatio(state.studio.draft.accentText, state.studio.draft.accent)") >= 3);
+    run(t.cc, "studioPickerInput('h', 200); studioPickerInput('s', 70); studioPickerInput('l', 45)");
+    ok('dragging the picker sliders previews live without storing or re-rendering', run(t.cc, 'state.studio.draft.accent') === run(t.cc, 'hslToHex(200, 70, 45)') && t.props['--accent'] === run(t.cc, 'hslToHex(200, 70, 45)') && J(t.cc.store) === snap);
+    ok('HSL round trip is stable', ['#e5303f', '#3468f0', '#10b981'].every((h) => { const hs = run(t.cc, "hexToHsl('" + h + "')"); const back = run(t.cc, 'hslToHex(' + hs.join(',') + ')'); return Math.abs(parseInt(back.slice(1, 3), 16) - parseInt(h.slice(1, 3), 16)) <= 4 && Math.abs(parseInt(back.slice(5, 7), 16) - parseInt(h.slice(5, 7), 16)) <= 4; }));
+  }
+  // ---- reset values, Reset to Red, delete ----
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:blue'); goThemeAdvanced(); studioSetColor('glowColor', '#22aacc'); studioStep('glowAlpha', -1)");
+    ok('per-value reset restores that value to the theme\u2019s original', run(t.cc, 'state.studio.draft.glowAlpha') === 0.5 && (run(t.cc, "studioResetToken('glowAlpha')"), run(t.cc, 'state.studio.draft.glowAlpha') === 0.55) && run(t.cc, 'state.studio.draft.glowColor') === '#22aacc');
+    run(t.cc, 'studioResetAll()'); ok('RESET ALL VALUES returns the whole draft to the theme\u2019s original', J(run(t.cc, 'state.studio.draft')) === J(presets[2].t) && run(t.cc, 'studioDirty()') === false);
+    run(t.cc, "studioSelect('p:blue'); studioSetColor('glowColor', '#22aacc')"); t.cc.setField('studio-name', 'Teal glow'); run(t.cc, 'studioSave()');
+    const id = JSON.parse(t.cc.store.wa_theme).customs[0].id;
+    run(t.cc, "studioSelect('c:" + id + "'); studioSetColor('glowColor', '#aa44cc'); studioResetAll()");
+    ok('for a custom theme, "original" means the built-in theme it was made from', J(run(t.cc, 'state.studio.draft')) === J(presets[2].t));
+    run(t.cc, 'studioReset()');
+    const st = JSON.parse(t.cc.store.wa_theme);
+    ok('RESET TO RED makes Red active, keeps every custom theme, and re-applies Red', st.active === 'p:red' && st.customs.length === 1 && t.props['--accent'] === '#e5303f' && JSON.parse(t.cc.store.wa_accentTheme) === 'red' && toast(t.cc) === 'RESET TO RED');
+    run(t.cc, "askDeleteTheme('" + id + "')");
+    ok('delete asks for confirmation first and removes nothing yet', run(t.cc, 'state.confirmAction.kind') === 'deleteTheme' && JSON.parse(t.cc.store.wa_theme).customs.length === 1 && run(t.cc, 'renderConfirmOverlay(state.confirmAction)').includes('DELETE THEME?'));
+    run(t.cc, 'cancelConfirmAction()'); ok('cancel keeps the theme', JSON.parse(t.cc.store.wa_theme).customs.length === 1);
+    run(t.cc, "askDeleteTheme('" + id + "'); confirmDeleteTheme()");
+    ok('confirmed delete of an inactive custom theme leaves the active theme alone', JSON.parse(t.cc.store.wa_theme).customs.length === 0 && JSON.parse(t.cc.store.wa_theme).active === 'p:red');
+  }
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:blue'); studioSetColor('glowColor', '#22aacc')"); t.cc.setField('studio-name', 'Mine'); run(t.cc, 'studioSave()');
+    const id = JSON.parse(t.cc.store.wa_theme).customs[0].id;
+    ok('the custom theme is active before deleting', JSON.parse(t.cc.store.wa_theme).active === 'c:' + id);
+    run(t.cc, "askDeleteTheme('" + id + "'); confirmDeleteTheme()");
+    const st = JSON.parse(t.cc.store.wa_theme);
+    ok('deleting the ACTIVE custom theme moves the app to a valid built-in theme (the one it came from)', st.active === 'p:blue' && st.customs.length === 0 && t.props['--accent'] === '#3468f0' && JSON.parse(t.cc.store.wa_accentTheme) === 'blue');
+    ok('the studio re-opens on the new active theme without a stale draft', run(t.cc, 'state.studio.baseId') === 'p:blue' && run(t.cc, 'studioPreviewing()') === false);
+  }
+  // ---- Glass and Blur ----
+  { const t = T8(RED); run(t.cc, 'initAccentTheme()');
+    ok('by default Glass is off and blur kill-switch is off (no effect classes)', !t.cls['fx-glass'] && !t.cls['fx-noblur']);
+    run(t.cc, "goThemeStudio(); studioSelect('p:red'); goThemeAdvanced(); studioToggle('glass')");
+    ok('Glass can be previewed (class on), and is not stored until SAVE', t.cls['fx-glass'] === true && t.cc.store.wa_theme === undefined);
+    t.cc.setField('studio-name', 'Glassy'); run(t.cc, 'studioSave()');
+    ok('saved Glass theme keeps the effect on', t.cls['fx-glass'] === true && JSON.parse(t.cc.store.wa_theme).customs[0].tokens.glass === true);
+    run(t.cc, 'studioToggleBlur()');
+    ok('DISABLE ALL BLUR turns every blur off immediately and also switches Glass off', t.cls['fx-noblur'] === true && !t.cls['fx-glass'] && JSON.parse(t.cc.store.wa_theme).disableBlur === true && toast(t.cc) === 'ALL BLUR OFF');
+    const re = T8(copyStore(t.cc)); run(re.cc, 'initAccentTheme()');
+    ok('the kill switch survives a restart', re.cls['fx-noblur'] === true && !re.cls['fx-glass']);
+    run(t.cc, 'studioToggleBlur()');
+    ok('turning it back off restores blur and the saved Glass choice', !t.cls['fx-noblur'] && t.cls['fx-glass'] === true);
+    const cu = T8(RED); run(cu.cc, "goThemeStudio(); goThemeAdvanced(); studioStep('blurNav', 1); studioStep('blurOverlay', -1)");
+    ok('blur amounts are adjustable within 0..20 and previewed', run(cu.cc, 'state.studio.draft.blurNav') === 11 && cu.props['--blur-nav'] === '11px' && cu.props['--blur-overlay'] === '5px');
+    for (let i = 0; i < 30; i++) run(cu.cc, "studioStep('blurNav', 1)");
+    ok('steppers clamp at their limits and never produce an invalid theme', run(cu.cc, 'state.studio.draft.blurNav') === 20 && run(cu.cc, 'validateTheme(state.studio.draft)').ok);
+    const unsupported = T8(RED); run(unsupported.cc, "CSS = { supports: () => false }; goThemeStudio(); goThemeAdvanced(); studioToggle('glass')");
+    ok('where the WebView lacks backdrop blur, Glass is unavailable and says so', run(unsupported.cc, 'state.studio.draft.glass') === false && toast(unsupported.cc) === 'NOT SUPPORTED ON THIS DEVICE' && run(unsupported.cc, 'renderThemeAdvanced()').includes('does not support backdrop blur'));
+  }
+  // ---- persistence, existing users, first run ----
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:blue'); studioSetColor('glowColor', '#22aacc')"); t.cc.setField('studio-name', 'Persist'); run(t.cc, 'studioSave()');
+    const re = T8(copyStore(t.cc)); run(re.cc, 'initAccentTheme()');
+    ok('the saved custom theme is applied again after a restart', re.props['--accent-glow'] === 'rgba(34, 170, 204, 0.55)' && re.props['--accent'] === '#3468f0');
+    const ex = T8({ wa_accentTheme: J('yellow') }); run(ex.cc, 'initAccentTheme()');
+    ok('existing users keep their current theme (legacy accent only: Yellow stays Yellow)', ex.props['--accent'] === '#e8b023' && ex.cc.store.wa_theme === undefined && run(ex.cc, "(goThemeStudio(), state.studio.baseId)") === 'p:yellow');
+    const fresh = T8({}); run(fresh.cc, 'initAccentTheme()');
+    ok('a fresh install still gets one random original accent and creates no theme data', ['red', 'yellow', 'blue'].includes(JSON.parse(fresh.cc.store.wa_accentTheme)) && fresh.cc.store.wa_theme === undefined);
+  }
+  { // corrupt or tampered stored data
+    const garbage = ['"x"', '[]', '123', 'null', '{"active":5}', J({ active: 'c:nope', customs: 'x' }), J({ active: 'p:zzz', customs: [null, 5, 'a', { id: 1 }] }),
+      J({ active: 'c:c_bad', customs: [{ id: 'c_bad', name: 'Light', tokens: Object.assign({}, D, { bg: '#ffffff' }) }] }),
+      J({ active: 'c:c_bad2', customs: [{ id: 'c_bad2', name: 'Unreadable', tokens: Object.assign({}, D, { text: '#202020' }) }] })];
+    garbage.forEach((g, i) => {
+      const t = T8({ wa_theme: g, wa_accentTheme: J('blue') });
+      let err = null; try { run(t.cc, "initAccentTheme(); goThemeStudio(); renderThemeStudio(); goThemeAdvanced(); renderThemeAdvanced()"); } catch (e) { err = e.message; }
+      ok('corrupt saved theme #' + (i + 1) + ' never breaks the app and falls back to a valid built-in theme', !err && t.props['--accent'] === '#3468f0' && run(t.cc, 'getThemeStore().customs.length') === 0, err || '');
+    });
+    const keep = T8({ wa_theme: J({ active: 'c:c_ok', customs: [{ id: 'c_ok', name: 'Fine', from: 'purple', tokens: { accent: '#1e8e63', junk: 1 } }, { id: 'c_ok2', name: 'fine', tokens: D }] }) });
+    const st = run(keep.cc, 'getThemeStore()');
+    ok('a custom theme with a few bad values is repaired (not discarded); duplicate names are made unique', st.customs.length === 2 && st.customs[0].tokens.accent === '#1e8e63' && st.customs[0].tokens.bg === '#0b0b0d' && st.customs[1].name !== 'fine' && st.active === 'c:c_ok');
+    const over = T8({ wa_theme: J({ active: 'p:red', customs: Array.from({ length: 8 }, (_, i) => ({ id: 'c_x' + i, name: 'T' + i, tokens: D })) }) });
+    ok('more than 5 saved custom themes are capped at 5', run(over.cc, 'getThemeStore().customs.length') === 5);
+  }
+  // ---- backup / import / migration ----
+  { const t = T8(RED); run(t.cc, "goThemeStudio(); studioSelect('p:blue'); studioSetColor('glowColor', '#22aacc')"); t.cc.setField('studio-name', 'Backed up'); run(t.cc, 'studioSave()');
+    const bk = run(t.cc, 'buildBackup()'), parsed = JSON.parse(bk);
+    ok('backups carry the theme and schemaVersion 5, still with the legacy accentTheme', parsed.schemaVersion === 5 && parsed.data.theme.customs.length === 1 && parsed.data.accentTheme === 'red');
+    const t2 = T8({}); t2.cc.setField('import-input', bk); run(t2.cc, "state.screen='settings';state.importOpen=true;applyImport()");
+    ok('the import preview lists the Theme Studio data and changes nothing yet', run(t2.cc, 'renderImportPreview()').includes('Theme Studio: 1 custom theme(s)') && t2.cc.store.wa_theme === undefined);
+    run(t2.cc, 'commitImport()');
+    ok('importing restores custom themes, the active theme and applies it', run(t2.cc, 'getThemeStore().customs[0].name') === 'Backed up' && t2.props['--accent-glow'] === 'rgba(34, 170, 204, 0.55)' && JSON.parse(t2.cc.store.wa_theme).active.indexOf('c:') === 0);
+    // old v4 backup (accentTheme only) keeps the existing theme data
+    const t3 = T8(copyStore(t.cc)); const v4 = J({ app: 'WorkoutApp', schemaVersion: 4, data: { accentTheme: 'yellow', history: [W('2026-09-01')] } });
+    t3.cc.setField('import-input', v4); run(t3.cc, "state.screen='settings';state.importOpen=true;applyImport();commitImport()");
+    ok('an old backup (v4, accentTheme only) imports normally and leaves saved custom themes alone', run(t3.cc, "Store.get('history').length") === 1 && run(t3.cc, 'getThemeStore().customs.length') === 1 && JSON.parse(t3.cc.store.wa_accentTheme) === 'yellow');
+    // invalid theme data: reported, skipped, rest imported
+    const bad = J({ app: 'WorkoutApp', schemaVersion: 5, data: { history: [W('2026-09-02')], theme: { active: 'c:c_a', customs: [{ id: 'c_a', name: 'Light', tokens: Object.assign({}, D, { bg: '#ffffff' }) }, { id: 'c_b', name: 'Good', tokens: D }, { id: 'bad id', name: 'x', tokens: D }] } } });
+    const t4 = T8({}); t4.cc.setField('import-input', bad); run(t4.cc, "state.screen='settings';state.importOpen=true;applyImport()");
+    const pv = run(t4.cc, 'renderImportPreview()');
+    ok('invalid imported themes are skipped and reported in the preview; the rest of the backup is kept', pv.includes('2 invalid skipped') && pv.includes('1 custom theme(s)') && pv.includes('1 workout/rest records'));
+    run(t4.cc, 'commitImport()');
+    ok('the light-background theme is never imported or applied', run(t4.cc, 'getThemeStore().customs.map((c) => c.name).join()') === 'Good' && run(t4.cc, "Store.get('history').length") === 1 && t4.props['--bg'] !== '#ffffff');
+    const junk = T8({}); junk.cc.setField('import-input', J({ app: 'WorkoutApp', data: { theme: 'nonsense', history: [W('2026-09-03')] } })); run(junk.cc, "state.screen='settings';state.importOpen=true;applyImport()");
+    ok('a malformed theme object in a backup is ignored (and said so) without dropping other data', run(junk.cc, 'renderImportPreview()').includes('Theme Studio data was invalid and is ignored') && run(junk.cc, 'state.importPreview.report.records') === 1);
+  }
+  { // training data is never touched by the studio; migration is additive
+    const t = T8(RED); run(t.cc, "Store.set('history', " + J([W('2026-10-01'), R('2026-10-02')]) + "); Store.set('exerciseMods', {'PUSH_A|Push-ups': {sets: 2}}); Store.set('customExercises', {}); Store.set('settings', {keepAwake:false})");
+    run(t.cc, "selectSession('PUSH_A'); openAdd()"); t.cc.setField('edit-name', 'Pike'); run(t.cc, 'saveEditCustom(); goHome()');
+    const before = trainSnap(t.cc);
+    run(t.cc, "goThemeStudio(); studioSelect('p:purple'); studioSave(); studioSelect('p:red'); studioBasicAccent('#22aa77')"); t.cc.setField('studio-name', 'Green'); run(t.cc, "studioSave(); goThemeAdvanced(); studioToggle('glass'); studioStep('glassBlur', 3); studioToggleBlur(); studioToggleBlur(); studioResetAll(); studioCancel()");
+    run(t.cc, "goThemeStudio(); askDeleteTheme(getThemeStore().customs[0].id); confirmDeleteTheme(); studioReset(); goHome()");
+    t.cc.setField('import-input', J({ app: 'WorkoutApp', data: { theme: { active: 'p:cyan', customs: [] } } })); run(t.cc, "state.screen='settings';state.importOpen=true;applyImport();commitImport()");
+    ok('history, saved exercise changes, added exercises and settings are byte-for-byte identical after every theme operation', trainSnap(t.cc) === before);
+    const mg = T8({ wa_schemaVersion: J(4), wa_history: J([W('2026-10-01')]), wa_accentTheme: J('blue'), wa_exerciseMods: J({ 'PUSH_A|Push-ups': { sets: 2 } }) });
+    const h0 = mg.cc.store.wa_history, m0 = mg.cc.store.wa_exerciseMods, a0 = mg.cc.store.wa_accentTheme; run(mg.cc, 'init()');
+    ok('migration to schema 5 only bumps the version: no theme key is created and no data is rewritten', run(mg.cc, "Store.get('schemaVersion')") === 5 && mg.cc.store.wa_theme === undefined && mg.cc.store.wa_history === h0 && mg.cc.store.wa_exerciseMods === m0 && mg.cc.store.wa_accentTheme === a0);
+  }
+  // ---- screens and stylesheet ----
+  { const t = T8(RED); run(t.cc, 'goThemeStudio()');
+    for (const p of presets) { run(t.cc, "studioSelect('p:" + p.id + "')"); const h = run(t.cc, 'renderThemeStudio()'), a = run(t.cc, 'renderThemeAdvanced()');
+      ok('Theme Studio and Advanced render cleanly for "' + p.id + '" (balanced markup, no undefined/NaN)', balanced(h) && balanced(a)); }
+    const h = run(t.cc, 'renderThemeStudio()'), a = run(t.cc, 'renderThemeAdvanced()');
+    ok('Basic shows all 8 presets in order, MY THEMES with the limit, accent picker + HEX, blur switch, Save/Cancel, Advanced and Reset to Red', (h.match(/class="theme-chip/g) || []).length === 8 && h.indexOf('>Red<') < h.indexOf('>Yellow<') && h.indexOf('>Yellow<') < h.indexOf('>Blue<') && h.includes('MY THEMES \u00b7 0/5') && h.includes('studio-hex-accent') && (h.match(/type="range"/g) || []).length === 3 && h.includes('DISABLE ALL BLUR') && h.includes('studioCancel()') && h.includes('goThemeAdvanced()') && h.includes('studioReset()'));
+    const labels = run(t.cc, 'TOKEN_DEFS.map((d) => d.label)'), groups = run(t.cc, 'THEME_GROUPS');
+    ok('Advanced lists every token with a label and a reset button, in the planned groups', labels.every((l) => a.includes(l)) && groups.every((g) => a.includes('settings-group-title">' + g + '<')) && (a.match(/studioResetToken\(/g) || []).length === labels.length && a.includes('RESET ALL VALUES'));
+    ok('Settings has a THEME STUDIO row in its own APPEARANCE group', run(make(NOW), 'renderSettings()').includes('settings-group-title">APPEARANCE') && run(make(NOW), 'renderSettings()').includes('onclick="goThemeStudio()"'));
+    run(t.cc, "studioSelect('p:red')"); ok('Save is disabled while there is nothing to save', /<button class="primary-btn" disabled/.test(run(t.cc, 'renderThemeStudio()')));
+    run(t.cc, "studioSelect('p:orange')"); ok('Save is enabled for a previewed theme and says what it will do', /<button class="primary-btn"\s+onclick="studioSave\(\)"/.test(run(t.cc, 'renderThemeStudio()')) && run(t.cc, 'renderThemeStudio()').includes('SAVE AND USE ORANGE'));
+    run(t.cc, "studioBasicAccent('#22aa77')"); ok('an edited preset offers SAVE AS CUSTOM THEME with a name field and a copy notice', run(t.cc, 'renderThemeStudio()').includes('SAVE AS CUSTOM THEME') && run(t.cc, 'renderThemeStudio()').includes('id="studio-name"') && run(t.cc, 'renderThemeStudio()').includes('The original is never changed'));
+  }
+  ok('stylesheet: dialog and bottom-bar blur read tokens whose defaults equal the previous fixed values (6px / 10px)', /\.overlay \{[^}]*blur\(var\(--blur-overlay\)\)/.test(css8) && /#bottom-nav \{[^}]*blur\(var\(--blur-nav\)\)/.test(css8) && /--blur-overlay:\s*6px/.test(css8) && /--blur-nav:\s*10px/.test(css8) && !/blur\((?:6|10)px\)/.test(css8));
+  ok('stylesheet: DISABLE ALL BLUR rule removes every backdrop-filter', /html\.fx-noblur \* \{[^}]*backdrop-filter: none !important/.test(css8));
+  ok('stylesheet: Glass reads tokens and only applies under html.fx-glass', /html\.fx-glass \.streak-card[^{]*\{[^}]*background: var\(--glass-bg\)[^}]*blur\(var\(--glass-blur\)\)/.test(css8));
 }
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
