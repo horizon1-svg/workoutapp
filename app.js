@@ -20,14 +20,37 @@ function localYesterdayStr() {
 const Store = (() => {
   let memoryFallback = {};
   let useLocal = true;
+  let router = null; // Data Safety: routes generation-backed keys (see DS below); null/unused in legacy mode
   try {
     localStorage.setItem('__wa_test__', '1');
     localStorage.removeItem('__wa_test__');
-  } catch (e) {
-    useLocal = false;
+  } catch (e) { useLocal = false; }
+  // Physical access (full key names, e.g. 'wa_ptr'). rawWrite reads the value back: true only if it is stored exactly as written.
+  function rawRead(name) { if (!useLocal) return null; try { return localStorage.getItem(name); } catch (e) { return null; } }
+  function rawWrite(name, text) { if (!useLocal) return false; try { localStorage.setItem(name, text); return localStorage.getItem(name) === text; } catch (e) { return false; } }
+  function rawRemove(name) { if (!useLocal) return true; try { localStorage.removeItem(name); return true; } catch (e) { return false; } }
+  function rawKeys() { // every physical key name (Web Storage length/key); null when the storage cannot be listed
+    if (!useLocal) return [];
+    try {
+      if (typeof localStorage.length !== 'number' || typeof localStorage.key !== 'function') return null;
+      const out = [];
+      for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k !== null) out.push(k); }
+      return out;
+    } catch (e) { return null; }
+  }
+  function setChecked(key, value) {
+    if (router && router.has(key)) return router.set(key, value);
+    memoryFallback[key] = value;
+    if (!useLocal) return true; // nothing durable is possible in a memory-only preview
+    try {
+      const s = JSON.stringify(value);
+      localStorage.setItem('wa_' + key, s);
+      return localStorage.getItem('wa_' + key) === (s === undefined ? 'undefined' : s);
+    } catch (e) { return false; }
   }
   return {
     get(key, fallback) {
+      if (router && router.has(key)) return router.get(key, fallback);
       if (useLocal) {
         try {
           const raw = localStorage.getItem('wa_' + key);
@@ -36,18 +59,425 @@ const Store = (() => {
       }
       return Object.prototype.hasOwnProperty.call(memoryFallback, key) ? memoryFallback[key] : fallback;
     },
-    set(key, value) {
-      // Always mirror into memory too, so if localStorage starts failing mid-session
-      // (quota, private-mode flip) get() still returns the last value we wrote.
-      memoryFallback[key] = value;
-      if (useLocal) {
-        try {
-          localStorage.setItem('wa_' + key, JSON.stringify(value));
-        } catch (e) { /* memory copy above already holds the value */ }
-      }
-    },
+    set(key, value) { return setChecked(key, value); },
+    setChecked,
+    rawRead, rawWrite, rawRemove, rawKeys,
+    get persistent() { return useLocal; },
+    setRouter(r) { router = r; },
   };
 })();
+
+// ---------- Data Safety (Phase 3A): generations + commit pointer ----------
+// Storage model (localStorage only; no absolute guarantee about what reaches the disk):
+//   Generation 0 = the original keys (wa_history, wa_exerciseMods, ...). They are NEVER modified or deleted by the migration.
+//   Generation N  = three separate keys wa_gN_plan / wa_gN_history / wa_gN_config, each stored as {v,h,d} (h = checksum of d).
+//   wa_ptr names the effective generation. Switching it with ONE setItem is the commit point; wa_ptr_bak keeps the previous pointer.
+// Routine writes (a finished workout, a setting) are single-key atomic writes into the effective generation, verified by read-back.
+// New generations are written only for structural operations (migration, import, restore) and are never deleted automatically.
+const DS_ROUTED = { history: 'history', exerciseMods: 'plan', customExercises: 'plan', settings: 'config', theme: 'config', accentTheme: 'config' };
+const DS = { mode: 'legacy', gen: 0, prev: null, ptr: null, notices: [], orphans: [] };
+function dsHash(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16).padStart(8, '0') + ':' + s.length; }
+function dsEnvelope(d) { const body = JSON.stringify(d); return '{"v":1,"h":"' + dsHash(body) + '","d":' + body + '}'; }
+function dsOpen(raw) { // payload, or undefined when missing/corrupt
+  if (raw === null || raw === undefined) return undefined;
+  try { const e = JSON.parse(raw); if (!e || e.v !== 1 || typeof e.h !== 'string' || !('d' in e)) return undefined; return dsHash(JSON.stringify(e.d)) === e.h ? e.d : undefined; } catch (err) { return undefined; }
+}
+const dsKey = (n, part) => 'wa_g' + n + '_' + part;
+function dsOpenFast(raw) { // routine reads: the checksum is verified at start-up and by every recovery read, not on each screen refresh
+  if (raw === null || raw === undefined) return undefined;
+  try { const e = JSON.parse(raw); return e && e.v === 1 && 'd' in e ? e.d : undefined; } catch (err) { return undefined; }
+}
+const dsIsObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+function dsReadGen(n) {
+  const out = {};
+  for (const part of ['plan', 'history', 'config']) { const d = dsOpen(Store.rawRead(dsKey(n, part))); if (d === undefined) return null; out[part] = d; }
+  const qraw = Store.rawRead(dsKey(n, 'quarantine')); // a generation written before this part existed simply has none
+  if (qraw === null) out.quarantine = [];
+  else { const q = dsOpen(qraw); if (!q || !Array.isArray(q.items)) return null; out.quarantine = q.items; }
+  if (!dsIsObj(out.plan) || !Array.isArray(out.plan.sessions) || !Array.isArray(out.history) || !dsIsObj(out.config)) return null;
+  return out;
+}
+const DS_PARTS = ['plan', 'history', 'config', 'quarantine'];
+function dsGenExists(n) { return DS_PARTS.some((p) => Store.rawRead(dsKey(n, p)) !== null); }
+function dsScan() { // every generation number present (ascending, no limit on gaps) or null when the storage cannot be listed: then NO result may be trusted as complete
+  let keys;
+  try { keys = Store.rawKeys(); } catch (e) { keys = null; }
+  if (!Array.isArray(keys)) return null;
+  const re = new RegExp('^wa_g(\\d+)_(' + DS_PARTS.join('|') + ')$'), found = new Set();
+  keys.forEach((k) => { const m = re.exec(k); if (m) { const n = Number(m[1]); if (Number.isSafeInteger(n) && n >= 1 && String(n) === m[1]) found.add(n); } });
+  return Array.from(found).sort((x, y) => x - y);
+}
+const dsScanAvailable = () => dsScan() !== null;
+function dsResolve() {
+  DS.notices = []; DS.orphans = []; DS.mode = 'legacy'; DS.gen = 0; DS.prev = null; DS.ptr = null;
+  if (!Store.persistent) return;
+  const praw = Store.rawRead('wa_ptr'), braw = Store.rawRead('wa_ptr_bak');
+  const check = (raw) => { if (raw === null) return null; try { const p = JSON.parse(raw); if (p && p.v === 1 && Number.isInteger(p.gen) && p.gen >= 1 && dsReadGen(p.gen)) return p; } catch (e) { /* unreadable */ } return null; };
+  let p = check(praw);
+  if (p) DS.mode = 'gen';
+  else if (praw !== null || braw !== null) {
+    const b = check(braw);
+    if (b) { p = b; DS.mode = 'gen'; DS.notices.push({ code: 'POINTER_RECOVERED' }); }
+    else { DS.mode = 'degraded'; DS.notices.push({ code: 'POINTER_UNREADABLE' }); }
+  }
+  if (p) {
+    DS.gen = p.gen; DS.prev = Number.isInteger(p.prev) ? p.prev : null; DS.ptr = p;
+    const sc = dsScan(); DS.orphans = sc ? sc.filter((n) => n > p.gen) : []; // unknown while the storage cannot be listed
+  }
+}
+const dsRouter = {
+  has(k) { return DS.mode !== 'legacy' && Object.prototype.hasOwnProperty.call(DS_ROUTED, k); },
+  get(k, fb) {
+    if (DS.mode === 'degraded') { const raw = Store.rawRead('wa_' + k); try { return raw !== null ? JSON.parse(raw) : fb; } catch (e) { return fb; } }
+    const part = DS_ROUTED[k], raw = Store.rawRead(dsKey(DS.gen, part)), d = part === 'history' ? dsOpenFast(raw) : dsOpen(raw);
+    if (d === undefined) return fb;
+    const v = part === 'history' ? d : d[k];
+    return v === undefined ? fb : v;
+  },
+  set(k, v) {
+    if (DS.mode !== 'gen') return false; // degraded: read-only until the user resolves it in DATA SAFETY
+    const part = DS_ROUTED[k];
+    let payload;
+    if (part === 'history') payload = v;
+    else {
+      const cur = dsOpen(Store.rawRead(dsKey(DS.gen, part)));
+      if (!dsIsObj(cur)) return false; // never rebuild a damaged part from guesses
+      payload = Object.assign({}, cur);
+      if (v === undefined) delete payload[k]; else payload[k] = v;
+    }
+    return Store.rawWrite(dsKey(DS.gen, part), dsEnvelope(payload));
+  },
+};
+function dsCapacity() { return typeof WA_STORAGE_LIMIT_CHARS === 'number' ? WA_STORAGE_LIMIT_CHARS : 5 * 1024 * 1024; } // characters; an estimate, the real limit is unknown
+function dsUsedChars() {
+  const names = ['history', 'exerciseMods', 'customExercises', 'settings', 'theme', 'accentTheme', 'activeSession', 'activeTimer', 'schemaVersion', 'exerciseSwaps', 'ptr', 'ptr_bak', 'quarantine', 'recovery_last', 'lastExport'];
+  let n = 0;
+  names.forEach((k) => { const raw = Store.rawRead('wa_' + k); if (raw !== null) n += raw.length + k.length + 3; });
+  const found = dsScan();
+  if (found === null) return null; // the generations cannot be listed: an estimate without them would be too small, so there is no estimate
+  found.forEach((g) => DS_PARTS.forEach((p) => { const raw = Store.rawRead(dsKey(g, p)); if (raw !== null) n += raw.length + dsKey(g, p).length; }));
+  return n;
+}
+function dsSpaceCheck(extraChars) {
+  const used = dsUsedChars(), cap = dsCapacity();
+  if (used === null) return { ok: false, unavailable: true, used: null, needed: extraChars, capacity: cap }; // no estimate: the answer is NO, and the caller must say why
+  return { ok: used + extraChars <= cap * 0.95, used, needed: extraChars, capacity: cap };
+}
+function dsNextGen() { const f = dsScan(); return f === null ? null : Math.max(DS.gen, f.length ? f[f.length - 1] : 0) + 1; } // null: the number cannot be chosen safely
+function dsCommit(parts, meta) {
+  meta = meta || {};
+  if (DS.mode === 'degraded' && !meta.allowDegraded) return { ok: false, step: 'DEGRADED' };
+  const gen = dsNextGen();
+  if (gen === null) return { ok: false, step: 'SCAN_UNAVAILABLE' }; // a new generation needs the list of every existing one; nothing is written
+  parts.plan.meta = Object.assign({ ts: Date.now(), reason: meta.reason || 'UPDATE' }, meta.info ? { migration: meta.info } : {});
+  // Quarantine is part of the generation: the current items + (a standalone key written by an earlier build, if any) + this operation's additions.
+  let base = meta.baseQuarantine;
+  if (!base) { const cur = DS.mode === 'gen' ? dsReadGen(DS.gen) : null; if (DS.mode === 'gen' && !cur) return { ok: false, step: 'CURRENT_UNREADABLE' }; base = cur ? cur.quarantine : []; }
+  const sa = dsOpen(Store.rawRead('wa_quarantine')), standalone = sa && Array.isArray(sa.items) ? sa.items : [];
+  const seen = new Set(), qAll = [];
+  base.concat(standalone, meta.quarantine || []).forEach((x) => { if (x && typeof x.qid === 'string' && !seen.has(x.qid)) { seen.add(x.qid); qAll.push(x); } });
+  const texts = { plan: dsEnvelope(parts.plan), history: dsEnvelope(parts.history), config: dsEnvelope(parts.config), quarantine: dsEnvelope({ items: qAll }) };
+  const space = dsSpaceCheck(texts.plan.length + texts.history.length + texts.config.length + texts.quarantine.length);
+  if (space.unavailable) return { ok: false, step: 'SCAN_UNAVAILABLE' }; // discovery failed while the space was being counted: nothing has been written yet
+  if (!space.ok) return { ok: false, step: 'SPACE', space };
+  const written = [], bakBefore = Store.rawRead('wa_ptr_bak');
+  const undo = () => { // best effort for caught failures only; an abrupt stop never relies on it: the pointer is the only commit point
+    written.forEach((k) => Store.rawRemove(k));
+    if (Store.rawRead('wa_ptr_bak') !== bakBefore) { if (bakBefore === null) Store.rawRemove('wa_ptr_bak'); else Store.rawWrite('wa_ptr_bak', bakBefore); }
+  };
+  for (const part of DS_PARTS) {
+    const key = dsKey(gen, part); written.push(key);
+    if (!Store.rawWrite(key, texts[part])) { undo(); return { ok: false, step: 'WRITE_' + part.toUpperCase() }; }
+  }
+  const back = dsReadGen(gen);
+  if (!back || back.history.length !== parts.history.length || back.plan.sessions.length !== parts.plan.sessions.length || back.quarantine.length !== qAll.length) { undo(); return { ok: false, step: 'VERIFY' }; }
+  const prevGen = DS.mode === 'degraded' ? null : DS.gen;
+  const ptr = { v: 1, gen, prev: prevGen, ts: Date.now(), counts: { history: parts.history.length, sessions: parts.plan.sessions.length, quarantine: qAll.length } };
+  if (DS.ptr && !Store.rawWrite('wa_ptr_bak', JSON.stringify(DS.ptr))) { undo(); return { ok: false, step: 'POINTER_BACKUP' }; }
+  const ptrText = JSON.stringify(ptr);
+  if (!Store.rawWrite('wa_ptr', ptrText)) {
+    if (Store.rawRead('wa_ptr') !== ptrText) { undo(); return { ok: false, step: 'POINTER' }; }
+  }
+  DS.mode = 'gen'; DS.prev = prevGen; DS.gen = gen; DS.ptr = ptr; DS.orphans = DS.orphans.filter((n) => n > gen);
+  DS.notices = DS.notices.filter((n) => n.code !== 'POINTER_UNREADABLE');
+  return { ok: true, gen, quarantine: qAll.length };
+}
+function dsWarmItems(arr, idPrefix) { return (Array.isArray(arr) ? arr : []).map((w, i) => ({ id: idPrefix + '_' + (i + 1), name: w.name, type: 'TIME', duration: w.duration })); }
+function dsBuildPlan(mods, customs) {
+  const keys = SESSION_ORDER.filter((k) => k !== 'REST' && EXERCISE_DB[k]);
+  return {
+    v: 1,
+    sessions: keys.map((k, i) => { const wn = EXERCISE_DB[k].warmup;
+      return { id: k, name: EXERCISE_DB[k].label, order: i, deleted: false,
+        warmup: WARMUP_DB[wn] ? { sourceId: 'wl_' + wn, sourceName: wn, items: dsWarmItems(WARMUP_DB[wn], 'ws_' + k) } : null }; }),
+    warmupLibrary: Object.keys(WARMUP_DB).map((n) => ({ id: 'wl_' + n, name: n, builtin: true, items: dsWarmItems(WARMUP_DB[n], 'wi_' + n) })),
+    exerciseMods: mods || {}, customExercises: customs || {},
+  };
+}
+function historySessionName(h) { // the name recorded when the session was saved; later renames/deletions never change it
+  if (!h || typeof h !== 'object') return '';
+  if (typeof h.sessionName === 'string' && h.sessionName) return h.sessionName;
+  if (h.summary && typeof h.summary.sessionLabel === 'string' && h.summary.sessionLabel) return h.summary.sessionLabel;
+  const d = EXERCISE_DB[h.type];
+  return d ? d.label : String(h.type);
+}
+function dsBackfillRecord(h) {
+  if (!dsIsObj(h) || h.type === 'REST' || typeof h.type !== 'string') return h;
+  const o = Object.assign({}, h);
+  if (!o.sessionId) o.sessionId = o.type;
+  if (!o.sessionName) o.sessionName = historySessionName(o);
+  return o;
+}
+function dsLegacyState() { // the original keys read as a complete state, without writing anything
+  const rd = (k) => { const raw = Store.rawRead('wa_' + k); if (raw === null) return {}; try { return { v: JSON.parse(raw) }; } catch (e) { return { bad: k }; } };
+  const h = rd('history'), m = rd('exerciseMods'), c = rd('customExercises'), s = rd('settings'), t = rd('theme'), a = rd('accentTheme');
+  const bad = [h, m, c, s, t, a].find((x) => x.bad);
+  if (bad) return { ok: false, issue: 'LEGACY_UNREADABLE' };
+  if ((h.v !== undefined && h.v !== null && !Array.isArray(h.v)) || [m, c].some((x) => x.v !== undefined && x.v !== null && !dsIsObj(x.v))) return { ok: false, issue: 'LEGACY_SHAPE' };
+  const config = {};
+  if (dsIsObj(s.v)) config.settings = s.v;
+  if (t.v !== undefined && t.v !== null) config.theme = t.v;
+  if (a.v !== undefined && a.v !== null) config.accentTheme = a.v;
+  return { ok: true, parts: { plan: dsBuildPlan(dsIsObj(m.v) ? m.v : {}, dsIsObj(c.v) ? c.v : {}), history: Array.isArray(h.v) ? h.v : [], config } };
+}
+function dsMigrate() {
+  if (DS.mode !== 'legacy' || !Store.persistent) return { skipped: true };
+  const L = dsLegacyState();
+  if (!L.ok) { DS.notices.push({ code: 'MIGRATION_SKIPPED', issue: L.issue }); return { ok: false, step: L.issue }; }
+  const raw = L.parts.history, cls = dsClassifyHistory([], raw, 'Migration');
+  if (!dsConserved([], raw, cls)) { DS.notices.push({ code: 'MIGRATION_FAILED', step: 'CONSERVATION_FAILED' }); return { ok: false, step: 'CONSERVATION_FAILED' }; }
+  compactHistory(cls.stay); // condensing happens only when a generation is written, never during routine saves
+  const info = { total: raw.length, kept: cls.stay.length, quarantined: cls.quarantine.length, identicalIgnored: cls.identical.length };
+  const r = dsCommit({ plan: L.parts.plan, history: cls.stay, config: L.parts.config }, { reason: 'MIGRATION', quarantine: cls.quarantine, info });
+  if (!r.ok) DS.notices.push({ code: 'MIGRATION_FAILED', step: r.step });
+  return r;
+}
+function dsInit() {
+  dsResolve();
+  Store.setRouter(dsRouter);
+  const auto = typeof WA_DATA_SAFETY_AUTOSTART === 'undefined' ? true : !!WA_DATA_SAFETY_AUTOSTART;
+  if (auto && DS.mode === 'legacy') dsMigrate();
+}
+function sessionNameFor(key) { // the name the plan gives the session today (3A: equal to the built-in label)
+  if (DS.mode === 'gen') { const plan = dsOpen(Store.rawRead(dsKey(DS.gen, 'plan'))); const x = plan && Array.isArray(plan.sessions) ? plan.sessions.find((t) => t && t.id === key) : null; if (x && typeof x.name === 'string' && x.name) return x.name; }
+  return EXERCISE_DB[key] ? EXERCISE_DB[key].label : String(key);
+}
+function sessionWarmupItems(key) { // the warm-up of a session: its own copy in the plan, or the built-in routine before the plan exists
+  if (DS.mode === 'gen') {
+    const plan = dsOpen(Store.rawRead(dsKey(DS.gen, 'plan')));
+    const s = plan && Array.isArray(plan.sessions) ? plan.sessions.find((x) => x && x.id === key) : null;
+    if (s && s.warmup === null) return [];
+    if (s && s.warmup && Array.isArray(s.warmup.items)) return s.warmup.items.map((w) => Object.assign({}, w));
+  }
+  const d = EXERCISE_DB[key], w = d && WARMUP_DB[d.warmup];
+  return Array.isArray(w) ? w.slice() : [];
+}
+// ----- Quarantine: records that could not be placed are kept, never deleted automatically -----
+function dsQuarantineGet() { // the Quarantine of the generation in use
+  if (DS.mode !== 'gen') return [];
+  const d = dsOpen(Store.rawRead(dsKey(DS.gen, 'quarantine')));
+  return d && Array.isArray(d.items) ? d.items : [];
+}
+function dsQuarantineDelete(qids) { // manual deletion only: one atomic write into the generation in use
+  if (DS.mode !== 'gen') return false;
+  const raw = Store.rawRead(dsKey(DS.gen, 'quarantine')); if (raw === null) return true;
+  const d = dsOpen(raw); if (!d || !Array.isArray(d.items)) return false;
+  return Store.rawWrite(dsKey(DS.gen, 'quarantine'), dsEnvelope({ items: d.items.filter((q) => !qids.includes(q.qid)) }));
+}
+function dsQuarantineText() {
+  return dsQuarantineGet().map((q) => [q.qid, q.reason, q.source, JSON.stringify(q.record)].join(' | ')).join('\n');
+}
+// ----- Generations list / manual deletion -----
+function dsListGenerations() { return dsListGenerationsRaw() || []; }
+function dsListGenerationsRaw() { // null when discovery is unavailable
+  const found = dsScan();
+  if (found === null) return null; // show nothing rather than a partial list
+  const out = [], legacy = dsLegacyState();
+  if (DS.mode === 'gen' && (Store.rawRead('wa_history') !== null || Store.rawRead('wa_exerciseMods') !== null || Store.rawRead('wa_settings') !== null))
+    out.push({ gen: 0, role: 'ORIGINAL', ok: legacy.ok, history: legacy.ok ? legacy.parts.history.length : null, chars: ['history', 'exerciseMods', 'customExercises', 'settings', 'theme', 'accentTheme'].reduce((n, k) => n + (Store.rawRead('wa_' + k) || '').length, 0), ts: null });
+  found.forEach((g) => {
+    const d = dsReadGen(g);
+    out.push({ gen: g, role: DS.mode === 'degraded' ? (d ? 'AVAILABLE' : 'DAMAGED') : (g === DS.gen ? 'CURRENT' : (g === DS.prev ? 'PREVIOUS' : (g > DS.gen ? 'ORPHAN' : 'OLDER'))), ok: !!d,
+      history: d ? d.history.length : null, ts: d && d.plan.meta ? d.plan.meta.ts : null, reason: d && d.plan.meta ? d.plan.meta.reason : null,
+      chars: DS_PARTS.reduce((n, p) => n + (Store.rawRead(dsKey(g, p)) || '').length, 0) });
+  });
+  return out;
+}
+function dsCanDelete(gen) {
+  if (DS.mode !== 'gen' || !dsScanAvailable()) return false; // deleting needs the full list too
+  if (gen === DS.gen || gen === DS.prev) return false;
+  if (gen === 0) return DS.gen >= 3;
+  return true;
+}
+function dsDeleteGeneration(gen) {
+  if (!dsCanDelete(gen)) return false;
+  const keys = gen === 0 ? ['history', 'exerciseMods', 'customExercises', 'settings', 'theme', 'accentTheme'].map((k) => 'wa_' + k) : DS_PARTS.map((p) => dsKey(gen, p));
+  return keys.map((k) => Store.rawRemove(k)).every(Boolean);
+}
+
+// ---------- Recovery engine: Dry Run (read-only) + safe apply, used for generation restore and backup import ----------
+function dsRecId(h) {
+  if (dsIsObj(h) && h.type === 'REST') return 'R|' + h.date;
+  if (dsIsObj(h) && typeof h.startedAt === 'number' && isFinite(h.startedAt)) return String(h.type) + '|' + h.startedAt;
+  return 'H|' + dsHash(JSON.stringify(h));
+}
+const DS_MAX_RECORD_CHARS = 64 * 1024; // a single history record larger than this is not a workout record
+function dsHistReason(h) { // null when the record is acceptable, otherwise the reason it is refused
+  if (!dsIsObj(h)) return 'NOT_AN_OBJECT';
+  if (typeof h.type !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(h.type)) return 'BAD_SESSION_ID';
+  if (!isValidDateStr(h.date)) return 'BAD_DATE';
+  if (h.status !== 'COMPLETED') return 'BAD_STATUS';
+  if (!(h.type === 'REST' || EXERCISE_DB[h.type] || (typeof h.sessionName === 'string' && h.sessionName.length >= 1 && h.sessionName.length <= 24))) return 'UNKNOWN_SESSION'; // a session that no longer exists must carry its own recorded name
+  if (JSON.stringify(h).length > DS_MAX_RECORD_CHARS) return 'RECORD_TOO_LARGE';
+  return null;
+}
+const dsHistValid = (h) => dsHistReason(h) === null;
+// Every record of the current history and of the source ends up in exactly one place: the new history, ignored as an identical copy, or Quarantine.
+function dsClassifyHistory(curList, srcList, label) {
+  const cls = { stay: [], identical: [], conflicts: [], currentOnly: [], invalid: [], invalidWhy: [], overflow: [], dupSource: [] };
+  const seen = new Map();
+  (srcList || []).forEach((raw) => {
+    const why = dsHistReason(raw);
+    if (why) { cls.invalid.push(raw); cls.invalidWhy.push(why); return; }
+    const h = dsBackfillRecord(raw), id = dsRecId(h);
+    if (seen.has(id)) { (JSON.stringify(seen.get(id)) === JSON.stringify(h) ? cls.identical : cls.dupSource).push(h); return; }
+    seen.set(id, h);
+  });
+  const curMap = new Map(), curExtra = [];
+  (curList || []).forEach((h) => { const id = dsRecId(h); if (curMap.has(id)) curExtra.push(h); else curMap.set(id, h); });
+  seen.forEach((h, id) => {
+    const c = curMap.get(id);
+    if (c !== undefined && JSON.stringify(c) === JSON.stringify(h)) cls.identical.push(h);
+    else if (c !== undefined) cls.conflicts.push(c);
+  });
+  curMap.forEach((h, id) => { if (!seen.has(id)) cls.currentOnly.push(h); });
+  curExtra.forEach((h) => cls.currentOnly.push(h));
+  const ordered = sortHistory(Array.from(seen.values()));
+  cls.stay = ordered.slice(0, HISTORY_CAP);
+  cls.overflow = ordered.slice(HISTORY_CAP);
+  const q = [];
+  const add = (reason, list, why) => list.forEach((record, i) => q.push(Object.assign({ qid: 'q_' + dsHash(reason + JSON.stringify(record)).replace(':', '') + '_' + i, ts: Date.now(), reason, source: label, record }, why ? { detail: why[i] } : {})));
+  add('NOT_IN_SOURCE', cls.currentOnly); add('CONFLICT_CURRENT_VERSION', cls.conflicts); add('OVERFLOW_OVER_LIMIT', cls.overflow);
+  add('INVALID_IN_SOURCE', cls.invalid, cls.invalidWhy); add('DUPLICATE_ID_DIFFERENT_CONTENT', cls.dupSource);
+  cls.quarantine = q;
+  return cls;
+}
+function dsFp(h) { // fingerprint that ignores what condensing changes, so it can compare a record before and after it was condensed
+  if (!dsIsObj(h)) return dsHash(JSON.stringify(h));
+  const o = Object.assign({}, h); delete o.details; delete o.metrics; delete o.condensed; delete o.durationMeasured;
+  if (dsIsObj(o.summary)) { o.summary = Object.assign({}, o.summary); delete o.summary.actualRepsList; }
+  return dsHash(JSON.stringify(o));
+}
+function dsConserved(curList, srcList, cls) { // proves that nothing in either list disappeared (linear time)
+  const have = new Set(), inv = new Set();
+  cls.stay.forEach((h) => have.add(dsFp(h))); cls.quarantine.forEach((x) => have.add(dsFp(x.record)));
+  cls.invalid.concat(cls.dupSource).forEach((h) => inv.add(dsFp(h)));
+  const present = (h) => !dsIsObj(h) || have.has(dsFp(h)) || have.has(dsFp(dsBackfillRecord(h)));
+  return (curList || []).every(present) && (srcList || []).every((h) => present(h) || inv.has(dsFp(h)));
+}
+function dsPlanSummary(plan) {
+  const sess = (plan.sessions || []).filter((s) => s && !s.deleted).length, mods = Object.keys(plan.exerciseMods || {}).length;
+  const added = Object.keys(plan.customExercises || {}).reduce((n, k) => n + (Array.isArray(plan.customExercises[k]) ? plan.customExercises[k].length : 0), 0);
+  return sess + ' sessions \u00b7 ' + (plan.warmupLibrary || []).length + ' warm-up routines \u00b7 ' + mods + ' modified \u00b7 ' + added + ' added exercises';
+}
+function dsSettingsDiff(a, b) {
+  a = a || {}; b = b || {};
+  return Array.from(new Set(Object.keys(a).concat(Object.keys(b)))).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k])).map((k) => k + ': ' + JSON.stringify(a[k]) + ' \u2192 ' + JSON.stringify(b[k]));
+}
+function recoveryDryRun(src) { // reads only; never calls setItem/removeItem
+  const out = { ok: false, errors: [], notices: [], blocked: null, src: { kind: src.kind, gen: src.gen === undefined ? null : src.gen } };
+  if (!dsScanAvailable()) { out.errors.push('GENERATIONS_UNAVAILABLE'); return out; } // the next generation number and the space estimate depend on knowing every generation
+  const degraded = DS.mode === 'degraded' && src.kind === 'generation'; // both pointers unreadable: only a generation that passes its own checksums and structure can be restored
+  if (DS.mode !== 'gen' && !degraded) { out.errors.push('NO_GENERATIONS'); return out; }
+  const cur = degraded ? { plan: null, history: [], config: {}, quarantine: [] } : dsReadGen(DS.gen);
+  if (!cur) { out.errors.push('CURRENT_UNREADABLE'); return out; }
+  out.degraded = degraded;
+  let label, res = cur.plan ? { plan: JSON.parse(JSON.stringify(cur.plan)), config: JSON.parse(JSON.stringify(cur.config)) } : { plan: null, config: {} }, srcHistory = null;
+  if (src.kind === 'generation') {
+    const g = dsReadGen(src.gen);
+    if (!g) { out.errors.push('SOURCE_UNREADABLE'); return out; }
+    label = 'Generation ' + src.gen; res = { plan: JSON.parse(JSON.stringify(g.plan)), config: JSON.parse(JSON.stringify(g.config)) }; srcHistory = g.history;
+    if (degraded) out.baseQuarantine = g.quarantine; // no current Quarantine is readable: the source generation's own Quarantine is carried forward
+  } else if (src.kind === 'legacy') {
+    const L = dsLegacyState();
+    if (!L.ok) { out.errors.push(L.issue); return out; }
+    label = 'Original data'; res = { plan: L.parts.plan, config: L.parts.config }; srcHistory = L.parts.history;
+  } else if (src.kind === 'backup' && src.plan && src.plan.next) {
+    const n = src.plan.next; label = 'Backup file';
+    if (n.history !== undefined) srcHistory = n.history;
+    ['exerciseMods', 'customExercises'].forEach((k) => { if (n[k] !== undefined) res.plan[k] = n[k]; });
+    if (n.plan) { res.plan.sessions = n.plan.sessions; res.plan.warmupLibrary = n.plan.warmupLibrary; }
+    ['settings', 'theme', 'accentTheme'].forEach((k) => { if (n[k] !== undefined) res.config[k] = n[k]; });
+  } else { out.errors.push('BAD_SOURCE'); return out; }
+  out.label = label;
+  out.ignored = src.kind === 'backup' && src.plan && src.plan.report && src.plan.report.planIgnored ? [{ section: 'Plan', reason: src.plan.report.planIgnored }] : [];
+  const cls = srcHistory === null ? null : dsClassifyHistory(cur.history, srcHistory, label);
+  const history = cls ? cls.stay : cur.history;
+  const q = cls ? cls.quarantine.slice() : [];
+  if (src.kind === 'backup' && src.plan.quarantine) src.plan.quarantine.forEach((x) => q.push(x)); // a backup's own Quarantine is merged, never replaced
+  const have = new Set((degraded ? out.baseQuarantine : dsQuarantineGet()).map((x) => x.qid));
+  out.qItems = q.filter((x) => !have.has(x.qid)).filter((x, i, a) => a.findIndex((y) => y.qid === x.qid) === i);
+  if (cls && !dsConserved(cur.history, srcHistory, cls)) { out.errors.push('CONSERVATION_FAILED'); return out; }
+  if (cls) compactHistory(cls.stay); // condensing happens only now, when a new generation is being prepared
+  out.cls = cls;
+  out.result = { plan: res.plan, history, config: res.config };
+  const qBefore = dsQuarantineGet().length;
+  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+  out.rows = [
+    { section: 'Plan', before: cur.plan ? dsPlanSummary(cur.plan) : 'not available (pointer damaged)', after: dsPlanSummary(res.plan), status: cur.plan && same(cur.plan.sessions, res.plan.sessions) && same(cur.plan.warmupLibrary, res.plan.warmupLibrary) && same(cur.plan.exerciseMods, res.plan.exerciseMods) && same(cur.plan.customExercises, res.plan.customExercises) ? 'SAME' : 'CHANGES' },
+    { section: 'History', before: cur.history.length + ' records', after: history.length + ' records', status: srcHistory === null ? 'KEPT' : (same(cur.history, history) ? 'SAME' : 'CHANGES') },
+    { section: 'Quarantine', before: qBefore + ' items', after: (qBefore + out.qItems.length) + ' items', status: out.qItems.length ? 'CHANGES' : 'SAME' },
+    { section: 'Settings', before: Object.keys(cur.config.settings || {}).length + ' values', after: Object.keys(res.config.settings || {}).length + ' values', status: same(cur.config.settings, res.config.settings) ? 'SAME' : 'CHANGES' },
+    { section: 'Theme', before: JSON.stringify(cur.config.accentTheme || null) + ' / ' + ((cur.config.theme && cur.config.theme.customs || []).length) + ' custom', after: JSON.stringify(res.config.accentTheme || null) + ' / ' + ((res.config.theme && res.config.theme.customs || []).length) + ' custom', status: same([cur.config.theme, cur.config.accentTheme], [res.config.theme, res.config.accentTheme]) ? 'SAME' : 'CHANGES' },
+  ];
+  out.counts = cls ? { stay: cls.stay.length, identical: cls.identical.length, quarantine: out.qItems.length, conflicts: cls.conflicts.length, notInSource: cls.currentOnly.length, overflow: cls.overflow.length, invalid: cls.invalid.length + cls.dupSource.length } : { stay: history.length, identical: 0, quarantine: out.qItems.length, conflicts: 0, notInSource: 0, overflow: 0, invalid: 0 };
+  const settingsDiff = dsSettingsDiff(cur.config.settings, res.config.settings);
+  out.details = { settings: settingsDiff, planChanged: out.rows[0].status === 'CHANGES', themeChanged: out.rows[4].status === 'CHANGES' };
+  out.detailsText = [label + ' \u2192 Generation ' + dsNextGen(), ...out.rows.map((r) => r.section + ': ' + r.before + ' \u2192 ' + r.after + ' [' + r.status + ']'),
+    'History: ' + out.counts.stay + ' stay, ' + out.counts.identical + ' identical ignored, ' + out.counts.quarantine + ' to Quarantine',
+    ...(settingsDiff.length ? ['Settings changes:'].concat(settingsDiff) : []),
+    ...(cls ? [].concat(
+      cls.stay.map((h) => 'STAY | ' + h.date + ' | ' + historySessionName(h)),
+      out.qItems.map((x) => 'QUARANTINE (' + x.reason + ') | ' + (dsIsObj(x.record) ? x.record.date + ' | ' + historySessionName(x.record) : JSON.stringify(x.record)))) : [])].join('\n');
+  const tp = JSON.stringify(out.result.plan), th = JSON.stringify(out.result.history), tc = JSON.stringify(out.result.config); // serialised once: used for the fingerprint and the space estimate
+  const qLen = out.qItems.reduce((n, x) => n + JSON.stringify(x).length + 2, 0);
+  if (out.ignored.length) out.detailsText += '\nIgnored sections: ' + out.ignored.map((x) => x.section + ' (' + x.reason + ')').join('; ');
+  out.hash = dsHash(tp + '|' + th + '|' + tc + '|' + out.qItems.map((x) => x.qid).join(','));
+  out.space = dsSpaceCheck(tp.length + th.length + tc.length + 150 + qLen);
+  if (!out.space.ok) { out.errors.push(out.space.unavailable ? 'GENERATIONS_UNAVAILABLE' : 'NOT_ENOUGH_SPACE'); return out; }
+  if (Store.get('activeSession', null)) out.blocked = 'WORKOUT_RUNNING';
+  out.ok = true;
+  return out;
+}
+function dsReportText(r) {
+  if (!r) return '';
+  return ['RECOVERY REPORT \u00b7 ' + new Date(r.ts).toISOString(), 'Operation: ' + r.type + ' \u00b7 Source: ' + r.source, 'Result: ' + r.outcome + (r.reason ? ' (' + r.reason + ')' : ''),
+    'Generation: ' + r.genBefore + ' \u2192 ' + r.genAfter, ...(r.rows || []).map((x) => x.section + ': ' + x.before + ' \u2192 ' + x.after + ' [' + x.status + ']'),
+    r.counts ? 'History: ' + r.counts.stay + ' stay, ' + r.counts.identical + ' identical ignored, ' + r.counts.quarantine + ' moved to Quarantine' : '',
+    ...(r.ignored || []).map((x) => 'Ignored: ' + x.section + ' (' + x.reason + ')'),
+    ...(r.integrity || []).map((c) => 'Check: ' + c.name + ' ' + (c.ok ? 'OK' : 'FAILED')), 'Report saved: ' + (r.saved ? 'yes' : 'no (copy it now)')].filter(Boolean).join('\n');
+}
+// Applies a recovery plan. The source is re-read and re-checked at the moment of confirmation; the data in use changes only at the pointer switch.
+function recoveryApply(src, shownHash, type) {
+  const rep = { v: 1, ts: Date.now(), type: type || 'RESTORE', source: '', outcome: 'ABORTED', reason: null, ignored: [], degraded: false, genBefore: DS.gen, genAfter: DS.gen, rows: [], counts: null, integrity: [], saved: false };
+  const finish = () => { if (rep.reason === 'GENERATIONS_UNAVAILABLE' || rep.reason === 'SCAN_UNAVAILABLE') { rep.saved = false; return { ok: false, report: rep }; } /* nothing at all is written while discovery is unavailable, not even the report */ rep.saved = true; rep.saved = Store.rawWrite('wa_recovery_last', JSON.stringify(rep)); return { ok: rep.outcome === 'COMMITTED', report: rep }; };
+  const dry = recoveryDryRun(src);
+  rep.source = dry.label || src.kind; rep.rows = dry.rows || []; rep.counts = dry.counts || null; rep.ignored = dry.ignored || []; rep.degraded = !!dry.degraded;
+  if (!dry.ok) { rep.reason = dry.errors[0]; return finish(); }
+  if (Store.get('activeSession', null)) { rep.reason = 'WORKOUT_RUNNING'; return finish(); }
+  if (shownHash && dry.hash !== shownHash) { rep.reason = 'CHANGED_SINCE_PREVIEW'; return finish(); }
+  const r = dsCommit(dry.result, { reason: rep.type, quarantine: dry.qItems, baseQuarantine: dry.baseQuarantine, allowDegraded: !!dry.degraded });
+  if (!r.ok) { rep.outcome = 'FAILED'; rep.reason = r.step; return finish(); }
+  rep.outcome = 'COMMITTED'; rep.genAfter = r.gen;
+  const now = dsReadGen(r.gen), qNow = dsQuarantineGet().map((x) => x.qid);
+  rep.integrity = [
+    { name: 'new generation readable', ok: !!now },
+    { name: 'history count matches preview', ok: !!now && now.history.length === dry.result.history.length },
+    { name: 'quarantine contains every moved record', ok: dry.qItems.every((x) => qNow.includes(x.qid)) },
+    { name: 'pointer names the new generation', ok: DS.gen === r.gen },
+  ];
+  return finish();
+}
 
 // ---------- Random accent theme ----------
 // Only --accent/--accent-soft/--accent-press/--accent-text/--shadow-accent/--accent-glow change; every other
@@ -712,6 +1142,9 @@ let state = {
   sessionKey: null,
   exerciseList: [],
   warmupList: [],
+  sessionName: null,   // Data Safety: name of the session as it was when this workout started (snapshot)
+  saveFailed: null,    // set when the finished workout could not be stored; the workout is kept until it is saved
+  dsOpen: false, ds: null, // DATA SAFETY / Recovery Center overlay state
   warmupIdx: 0,
   curExerciseIdx: 0,
   curSet: 1,
@@ -815,7 +1248,8 @@ function resumeSession() {
   const lastSeen = Math.max(saved.lastSeenAt || 0, (seenSnap && seenSnap.sessionStartedAt === state.sessionStartedAt) ? (seenSnap.lastSeenAt || 0) : 0);
   state.offlineMs = saved.offlineMs || 0;
   if (lastSeen && Date.now() - lastSeen > AWAY_THRESHOLD_MS) state.offlineMs += Date.now() - lastSeen;
-  state.warmupList = WARMUP_DB[EXERCISE_DB[state.sessionKey].warmup];
+  state.warmupList = Array.isArray(saved.warmupList) ? saved.warmupList : sessionWarmupItems(state.sessionKey);
+  state.sessionName = saved.sessionName || sessionNameFor(state.sessionKey);
   state.paused = false;
   state.pausedAt = null;
 
@@ -878,9 +1312,9 @@ function resetExerciseSets() { // undo temporary set changes: back to each exerc
 // Built-in definitions (data.js) are NEVER modified. User data lives in two separate stores:
 //   exerciseMods:    { 'SESSION|Original name': { name?, sets?, target? } }   differences from the built-in default only
 //   customExercises: { SESSION: [ { id: 'u_...', name, type, target, sets, createdAt } ] }
-// A session never holds more than MAX_EXERCISES exercises (built-in + added): enforced when adding AND when reading.
+// There is no hard limit on the number of exercises in a session (Phase 3A). EXERCISE_NOTICE_AT only controls a non-blocking notice.
 // Temporary changes live only in state.exerciseList; they become permanent only through an explicit save.
-const MAX_EXERCISES = 10;
+const EXERCISE_NOTICE_AT = 10;
 const MAX_SETS = 10;
 function sanitizeExerciseName(v) { return String(v == null ? '' : v).replace(/[<>"&`\\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 40); }
 function isInt(v, lo, hi) { return Number.isInteger(v) && v >= lo && v <= hi; }
@@ -939,9 +1373,9 @@ function cleanMods(raw) {
 function cleanCustomList(key, raw) {
   const def = EXERCISE_DB[key];
   if (!def || !Array.isArray(raw)) return [];
-  const room = MAX_EXERCISES - def.exercises.length, seen = new Set(), out = [];
+  const seen = new Set(), out = [];
   raw.forEach((c) => {
-    if (out.length >= room || !c || typeof c !== 'object' || typeof c.id !== 'string' || !/^u_[a-z0-9]+$/.test(c.id) || seen.has(c.id)) return;
+    if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !/^u_[a-z0-9]+$/.test(c.id) || seen.has(c.id)) return;
     const v = validateExercise(c);
     if (!v.ok) return;
     seen.add(c.id);
@@ -973,7 +1407,8 @@ function getCustoms(key) { const all = Store.get('customExercises', {}); return 
 function exerciseCount(key) { return EXERCISE_DB[key].exercises.length + getCustoms(key).length; }
 function rawObj(k) { const r = Store.get(k, {}); return (r && typeof r === 'object' && !Array.isArray(r)) ? Object.assign({}, r) : {}; }
 function writeCustoms(key, list) { const all = rawObj('customExercises'); all[key] = list; Store.set('customExercises', all); }
-function nameTaken(key, name, exceptId) {
+function nameTaken(key, name, exceptId) { // Phase 3A: duplicate names are allowed; every exercise has its own independent id
+  return false;
   const n = name.toLowerCase(), mods = getMods();
   const used = EXERCISE_DB[key].exercises.map((e) => { const id = exerciseId(key, e.name), m = mods[id]; return { id, n: ((m && m.name) || e.name).toLowerCase() }; })
     .concat(getCustoms(key).map((c) => ({ id: c.id, n: c.name.toLowerCase() })));
@@ -998,12 +1433,10 @@ function resetBuiltinMod(id) { const all = rawObj('exerciseMods'); delete all[id
 function addCustomExercise(key, d) {
   if (!EXERCISE_DB[key]) return { ok: false, error: 'SESSION' };
   const list = getCustoms(key);
-  if (EXERCISE_DB[key].exercises.length + list.length >= MAX_EXERCISES) return { ok: false, error: 'LIMIT' }; // hard limit, independent of the UI
   const v = validateExercise(d);
   if (!v.ok) return v;
   const id = (d && typeof d.id === 'string' && /^u_[a-z0-9]+$/.test(d.id)) ? d.id : newExerciseId();
   if (list.some((c) => c.id === id)) return { ok: false, error: 'DUPLICATE' }; // the same submission arriving twice
-  if (nameTaken(key, v.value.name, null)) return { ok: false, error: 'NAME_EXISTS' };
   const rec = Object.assign({ id, createdAt: Date.now() }, v.value);
   writeCustoms(key, list.concat(rec));
   return { ok: true, rec };
@@ -1042,7 +1475,7 @@ function buildSessionList(key) {
     return ex;
   });
   getCustoms(key).forEach((c) => list.push(makeCustomExercise(c)));
-  return list.slice(0, MAX_EXERCISES);
+  return list;
 }
 function exFlags(ex) {
   let saved = false;
@@ -1061,7 +1494,8 @@ function exFlagsHtml(ex) {
   if (f.temp) h += '<span class="flag flag-temp">THIS WORKOUT ONLY</span>';
   return h;
 }
-function listNameTaken(name, exceptIdx) {
+function listNameTaken(name, exceptIdx) { // duplicates are allowed (independent ids)
+  return false;
   const n = name.toLowerCase();
   return state.exerciseList.some((x, i) => i !== exceptIdx && x.name.toLowerCase() === n);
 }
@@ -1089,7 +1523,7 @@ function exerciseFromDraft(d) {
   return { name: d.name, type: d.type, sets: d.sets, target };
 }
 function editErrorText(code) {
-  return ({ NAME: 'ENTER A NAME', TYPE: 'CHOOSE A TYPE', SETS: 'SETS MUST BE 1\u201310', TARGET: 'CHECK THE TARGET', LIMIT: 'LIMIT: ' + MAX_EXERCISES + ' EXERCISES PER WORKOUT',
+  return ({ NAME: 'ENTER A NAME', TYPE: 'CHOOSE A TYPE', SETS: 'SETS MUST BE 1\u201310', TARGET: 'CHECK THE TARGET', LIMIT: 'COULD NOT SAVE',
     DUPLICATE: 'ALREADY ADDED', NAME_EXISTS: 'NAME ALREADY USED', SESSION: 'COULD NOT SAVE' })[code] || 'COULD NOT SAVE';
 }
 function openEdit(i) {
@@ -1101,7 +1535,6 @@ function openEdit(i) {
 }
 function openAdd() {
   if (state.screen !== 'setup') return;
-  if (state.exerciseList.length >= MAX_EXERCISES || exerciseCount(state.sessionKey) >= MAX_EXERCISES) { showToast(editErrorText('LIMIT')); return; }
   state.editEx = { ctx: 'setup', sessionKey: state.sessionKey, index: null, exId: newExerciseId(), isNew: true, custom: true,
     draft: { name: '', type: 'REPS', sets: 3, tMin: 12, tMax: 12, tSec: 60 } };
   render();
@@ -1172,7 +1605,6 @@ function saveEditCustom() {
   const v = readEditDraft();
   if (!v) return;
   if (e.isNew) {
-    if (state.screen === 'setup' && state.exerciseList.length >= MAX_EXERCISES) { showToast(editErrorText('LIMIT')); return; }
     const r = addCustomExercise(e.sessionKey, Object.assign({ id: e.exId }, v));
     if (!r.ok) {
       showToast(editErrorText(r.error));
@@ -1251,7 +1683,6 @@ function hubFilter(f) { if (!state.hub || !['all', 'modified', 'added'].includes
 function hubAdd() {
   if (!state.hub) return;
   const key = state.hub.session;
-  if (exerciseCount(key) >= MAX_EXERCISES) { showToast(editErrorText('LIMIT')); return; }
   state.editEx = { ctx: 'manager', sessionKey: key, index: null, exId: newExerciseId(), isNew: true, custom: true,
     draft: { name: '', type: 'REPS', sets: 3, tMin: 12, tMax: 12, tSec: 60 } };
   render();
@@ -1277,7 +1708,7 @@ function renderEditSheet() {
   const stepper = (field, label, text, hint) => `<div class="field-row"><span class="field-label">${label}${hint ? `<small>${hint}</small>` : ''}</span><span class="stepper-inline">
     <button class="stepper-btn" onclick="editStep('${field}',-1)" aria-label="Decrease ${label}">\u2212</button><span class="stepper-value">${text}</span>
     <button class="stepper-btn" onclick="editStep('${field}',1)" aria-label="Increase ${label}">+</button></span></div>`;
-  const scope = e.isNew ? `Added to ${def.label} only \u00b7 ${used}/${MAX_EXERCISES} exercises used.`
+  const scope = e.isNew ? `Added to ${def.label} only \u00b7 ${used} exercises in this workout.`
     : (e.custom ? `This added exercise exists in ${def.label} only.` : `Saved changes apply to this exercise in ${def.label} only. Other sessions are not affected.`);
   // original vs saved values
   let compare = '';
@@ -1304,7 +1735,7 @@ function renderEditSheet() {
   else if (d.type === 'TIME') h += stepper('tSec', 'DURATION', fmtTime(d.tSec), info && isNum(info.ex.target) ? 'DEFAULT ' + fmtTime(info.ex.target) : '');
   else h += '<div class="p-note">Max-effort exercise: no target to set.</div>';
   if (e.isNew) {
-    h += `<button class="sheet-action primary" onclick="saveEditCustom()"><b>ADD TO ${def.label}</b><span>Saved with this workout and counted toward the ${MAX_EXERCISES}-exercise limit.</span></button>`;
+    h += `<button class="sheet-action primary" onclick="saveEditCustom()"><b>ADD TO ${def.label}</b><span>Saved with this workout.</span></button>`;
   } else {
     if (e.ctx === 'setup') h += `<button class="sheet-action" onclick="applyEditTemp()"><b>APPLY TO THIS WORKOUT</b><span>One-time change. Your saved settings stay as they are.</span></button>`;
     h += `<button class="sheet-action primary" onclick="saveEditCustom()"><b>${e.custom ? 'SAVE CHANGES' : 'SAVE AS CUSTOM'}</b><span>Used in every future ${def.label} workout.</span></button>`;
@@ -1332,8 +1763,8 @@ function renderCustomMods() {
     const sub = any ? [s.modified ? s.modified + ' MOD' : '', s.added ? s.added + ' ADDED' : ''].filter(Boolean).join(' \u00b7 ') : 'DEFAULT';
     return `<button class="hub-tab${k === key ? ' is-active' : ''}${any ? ' has-custom' : ''}" role="tab" aria-selected="${k === key}" onclick="hubSelect('${k}')"><b>${sessionShort(k)}</b><span>${sub}</span></button>`;
   }).join('') + '</div>';
-  h += `<div class="hub-head"><div><div class="hub-title">${def.label}</div><div class="hub-sub">${st.total}/${MAX_EXERCISES} exercises \u00b7 ${st.modified} modified \u00b7 ${st.added} added</div></div>
-    <button class="swap-btn" ${st.total >= MAX_EXERCISES ? 'disabled' : ''} onclick="hubAdd()" aria-label="Add exercise">${icon('plus', 12)}<span>ADD</span></button></div>`;
+  h += `<div class="hub-head"><div><div class="hub-title">${def.label}</div><div class="hub-sub">${st.total} exercises \u00b7 ${st.modified} modified \u00b7 ${st.added} added</div></div>
+    <button class="swap-btn" onclick="hubAdd()" aria-label="Add exercise">${icon('plus', 12)}<span>ADD</span></button></div>`;
   if (hasAny) h += `<div class="segmented wide">${[['all', 'ALL', st.total], ['modified', 'MODIFIED', st.modified], ['added', 'ADDED', st.added]].map((x) => `<button class="seg ${f === x[0] ? 'active' : ''}" onclick="hubFilter('${x[0]}')">${x[1]} ${x[2]}</button>`).join('')}</div>`;
   const items = [];
   def.exercises.forEach((e, idx) => { const m = mods[exerciseId(key, e.name)]; items.push({ kind: 'b', idx, e, m }); });
@@ -1342,12 +1773,12 @@ function renderCustomMods() {
   if (!hasAny && f === 'all') {
     h += `<div class="hub-empty">${icon('edit', 26)}<div class="empty-title">NO CUSTOMIZATIONS FOR ${def.label}</div>
       <div class="empty-sub">Tap an exercise below to change its sets, reps or duration, or add your own.</div>
-      <div class="empty-actions"><button class="pill-btn primary" onclick="hubOpenWorkout()">OPEN SETUP</button><button class="pill-btn" ${st.total >= MAX_EXERCISES ? 'disabled' : ''} onclick="hubAdd()">ADD EXERCISE</button></div></div>`;
+      <div class="empty-actions"><button class="pill-btn primary" onclick="hubOpenWorkout()">OPEN SETUP</button><button class="pill-btn" onclick="hubAdd()">ADD EXERCISE</button></div></div>`;
   } else if (!shown.length) {
     const isMod = f === 'modified';
     h += `<div class="hub-empty">${icon(isMod ? 'edit' : 'plus', 26)}<div class="empty-title">${isMod ? 'NO MODIFIED EXERCISES' : 'NO ADDED EXERCISES'}</div>
-      <div class="empty-sub">${isMod ? 'Exercises you change and save appear here.' : 'Add your own exercise to this workout (' + st.total + ' of ' + MAX_EXERCISES + ' used).'}</div>
-      <div class="empty-actions">${isMod ? '' : `<button class="pill-btn primary" ${st.total >= MAX_EXERCISES ? 'disabled' : ''} onclick="hubAdd()">ADD EXERCISE</button>`}<button class="pill-btn" onclick="hubFilter('all')">SHOW ALL</button></div></div>`;
+      <div class="empty-sub">${isMod ? 'Exercises you change and save appear here.' : 'Add your own exercise to this workout (' + st.total + ' so far).'}</div>
+      <div class="empty-actions">${isMod ? '' : `<button class="pill-btn primary" onclick="hubAdd()">ADD EXERCISE</button>`}<button class="pill-btn" onclick="hubFilter('all')">SHOW ALL</button></div></div>`;
   }
   shown.forEach((it) => {
     if (it.kind === 'u') {
@@ -1428,7 +1859,6 @@ function saveSessionDefault() { // explicit and all-or-nothing: validate everyth
     const v = validateExercise(ex);
     if (!v.ok) { showToast(editErrorText(v.error)); return; }
     const n = v.value.name.toLowerCase();
-    if (seen.has(n)) { showToast(editErrorText('NAME_EXISTS')); return; }
     seen.add(n); vals.push(v.value);
   }
   const mods = rawObj('exerciseMods'), customs = getCustoms(key).slice();
@@ -1475,7 +1905,9 @@ function startWorkoutFlow() {
   state.curExerciseIdx = 0;
   state.curSet = 1;
   state.warmupIdx = 0;
-  state.warmupList = WARMUP_DB[EXERCISE_DB[state.sessionKey].warmup];
+  state.warmupList = sessionWarmupItems(state.sessionKey); // snapshot: later plan edits never change a running workout
+  state.sessionName = sessionNameFor(state.sessionKey);
+  state.saveFailed = null;
   state.sessionStartedAt = Date.now();
   state.offlineMs = 0;
   resetMotivationHistory(); // fresh variety of rest-screen cards each workout
@@ -1505,6 +1937,7 @@ function beginWarmupStep(resumeEndsAt) {
   state.screen = 'warmup';
   state.paused = false;
   const item = state.warmupList[state.warmupIdx];
+  if (!item) { beginActiveWorkout(); return; } // a session without warm-up exercises skips the warm-up screen
   startCountdown(resolveWarmupDuration(item), render, warmupStepComplete, resumeEndsAt);
 }
 function warmupStepComplete() {
@@ -1747,6 +2180,8 @@ function persistActiveSession() {
     sessionStartedAt: state.sessionStartedAt,
     offlineMs: state.offlineMs || 0,
     lastSeenAt: Date.now(),
+    sessionName: state.sessionName,
+    warmupList: state.warmupList,
   });
 }
 function clearActiveSession() {
@@ -1764,7 +2199,7 @@ function buildDetails() {
 function finishWorkout() {
   clearInterval(state.timer.intervalId);
   releaseWakeLock();
-  const endedAt = Date.now();
+  const endedAt = (state.saveFailed && state.saveFailed.endedAt) || Date.now();
   const startedAt = state.sessionStartedAt || endedAt;
   // Duration excludes any long stretch where the app was closed and later resumed.
   const durationSeconds = Math.max(0, Math.round((endedAt - startedAt - (state.offlineMs || 0)) / 1000));
@@ -1785,7 +2220,15 @@ function finishWorkout() {
   };
   // Never save the same session twice (double tap, revisiting the completion flow).
   const existing = Store.get('history', []).find((h) => h && h.type === entry.type && h.startedAt === startedAt);
-  if (existing) entry = existing; else saveHistoryEntry(entry);
+  const saved = existing ? true : saveHistoryEntry(entry);
+  if (!saved) { // the record is not in storage: keep the workout, tell the user, allow RETRY / COPY SUMMARY
+    state.saveFailed = { endedAt, summary, entry };
+    state.lastSummary = summary; state.lastEntry = entry;
+    persistActiveSession();
+    render();
+    return;
+  }
+  state.saveFailed = null;
   clearActiveSession();
   state.lastSummary = summary;
   state.lastEntry = entry;
@@ -1807,7 +2250,7 @@ function buildSummary() {
     .filter((r) => r.status === 'completed' && r.actual !== null)
     .map((r) => `${r.exerciseName} \u2014 SET ${r.setNumber}: ${r.actual}`);
   return {
-    sessionLabel: EXERCISE_DB[state.sessionKey].label,
+    sessionLabel: state.sessionName || EXERCISE_DB[state.sessionKey].label,
     completedExercises, totalExercises,
     completedSets, totalSetsPlanned,
     skippedExercises, skippedSets,
@@ -1822,7 +2265,8 @@ function buildSummary() {
 // Single source of truth: Store 'history'. A date is classified only from its own records:
 //   T = at least one completed workout   R = no workout, but an explicit REST record   U = no record (unknown)
 // Unknown is never treated as rest, as a miss, or as a training day. Nothing is ever back-filled.
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6; // 6 = data lives in generations (Data Safety). The value 6 is written only after a generation was created, verified and made current.
+const schemaNow = () => (DS.mode === 'gen' ? SCHEMA_VERSION : 5); // while the original storage is still in use the data format is still version 5
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const HISTORY_CAP = 1500;          // entries kept in total (oldest dropped beyond this)
 const HISTORY_FULL_DETAIL = 150;   // newest entries keep per-set details; older ones are condensed
@@ -1962,13 +2406,14 @@ function sortHistory(arr) { // newest first by date, then start time; stable for
     return sb - sa || a[1] - b[1];
   }).map((p) => p[0]);
 }
-function saveHistoryEntry(entry) {
+function saveHistoryEntry(entry) { // true only when the new list is verified in storage
   let hist = Store.get('history', []);
   if (!Array.isArray(hist)) hist = [];
+  if (DS.mode === 'gen') entry = dsBackfillRecord(entry); // the session name is stored inside the record
   hist.unshift(entry);
   hist = sortHistory(hist); // an older-dated entry (e.g. a resumed old session) still lands in date order
-  compactHistory(hist);
-  Store.set('history', hist.slice(0, HISTORY_CAP));
+  if (DS.mode !== 'gen') compactHistory(hist); // generation mode never condenses during a routine save
+  return Store.setChecked('history', hist.slice(0, HISTORY_CAP));
 }
 // v3: history is the only source for streak/calendar ('days'/'streak' keys left untouched, unused).
 // v4: the old name-only 'exerciseSwaps' feature is folded into 'exerciseMods' (the old key is left untouched).
@@ -1990,7 +2435,7 @@ function migrateData() {
       Store.set('exerciseMods', mods);
     }
   }
-  Store.set('schemaVersion', SCHEMA_VERSION);
+  Store.set('schemaVersion', schemaNow());
 }
 
 // ================== RENDERING ==================
@@ -2240,9 +2685,9 @@ function renderSetup() {
     </div>`;
   });
   html += '</div>';
-  const exCount = state.exerciseList.length, full = exCount >= MAX_EXERCISES;
-  html += `<button class="add-exercise" ${full ? 'disabled' : ''} onclick="openAdd()">${icon('plus', 16)}<span>ADD EXERCISE</span><b>${exCount}/${MAX_EXERCISES}</b></button>`;
-  if (full) html += `<div class="p-note add-note">A workout can have at most ${MAX_EXERCISES} exercises. Remove an added exercise to free a slot.</div>`;
+  const exCount = state.exerciseList.length, long = exCount >= EXERCISE_NOTICE_AT;
+  html += `<button class="add-exercise" onclick="openAdd()">${icon('plus', 16)}<span>ADD EXERCISE</span><b>${exCount}</b></button>`;
+  if (long) html += `<div class="p-note add-note">This workout has ${exCount} exercises. Long workouts take more time to finish and to save. You can keep adding.</div>`;
   html += `<button class="primary-btn" onclick="startWorkoutFlow()">${icon('play', 16)} START WORKOUT</button>`;
   html += '</div>';
   return html;
@@ -2496,7 +2941,7 @@ function renderHistory() {
     html += '<div class="history-list">';
     let focusDone = false;
     hist.forEach((h, idx) => {
-      const label = h.type === 'REST' ? 'REST' : (EXERCISE_DB[h.type] ? EXERCISE_DB[h.type].label : h.type);
+      const label = h.type === 'REST' ? 'REST' : esc(historySessionName(h));
       const chipIcon = h.type === 'REST' ? 'moon' : 'dumbbell';
       const isFocus = !!state.historyFocus && h.date === state.historyFocus;
       const idAttr = isFocus && !focusDone ? ' id="hist-focus"' : '';
@@ -2538,6 +2983,7 @@ function renderSettings() {
     <div class="settings-group-title">DATA</div>
     ${link('exportData()', 'download', 'EXPORT BACKUP', 'Copy your data to the clipboard', false)}
     ${link('openImport()', 'upload', 'IMPORT BACKUP', 'Restore from a backup you exported', false)}
+    ${link('openDataSafety()', 'settings', 'DATA SAFETY', 'Generations, Quarantine and recovery', false)}
   </div>`;
 }
 
@@ -2587,6 +3033,13 @@ function renderModal() {
       const input = document.getElementById('time-input');
       if (input) input.focus();
     }
+    drawerWasOpen = false;
+  } else if (state.saveFailed) {
+    root.innerHTML = renderSaveFailed();
+    drawerWasOpen = false;
+  } else if (state.importOpen && state.dsOpen && state.screen === 'settings') {
+    if (state.ds.view === 'import') { if (!root.querySelector('#import-input')) { root.innerHTML = renderDataSafety(); const input = document.getElementById('import-input'); if (input) input.focus(); } }
+    else root.innerHTML = renderDataSafety();
     drawerWasOpen = false;
   } else if (state.importOpen && state.screen === 'settings') {
     if (state.importPreview) {
@@ -2922,7 +3375,7 @@ function renderDayDetail(idx, ds, today) {
   if (!d) return `<div class="p-card"><div class="p-title">${title}</div><div class="day-row"><b>NO RELIABLE RECORD</b><span>The app has no activity record for this date. That does not mean you did not train.</span></div></div>`;
   let h = `<div class="p-card"><div class="p-title">${title}</div>`;
   d.workouts.slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)).forEach((e) => {
-    const label = EXERCISE_DB[e.type] ? EXERCISE_DB[e.type].label : esc(e.type);
+    const label = esc(historySessionName(e));
     const du = entryDuration(e);
     const durTxt = du.kind === 'unavailable' ? 'duration not recorded' : du.kind === 'excluded' ? 'duration excluded (older record over 3 h)' : fmtDuration(du.sec) + (du.kind === 'legacy' ? ' (older record)' : '');
     const sets = entrySets(e), planned = entryPlannedSets(e);
@@ -3037,7 +3490,7 @@ function buildProgressExport(key) {
     const list = d.workouts.slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
     list.forEach((e, i) => {
       T.sessions++;
-      const label = EXERCISE_DB[e.type] ? EXERCISE_DB[e.type].label : String(e.type);
+      const label = historySessionName(e);
       const du = entryDuration(e);
       let durTxt;
       if (du.kind === 'unavailable') { durTxt = 'not recorded'; T.durMissing++; }
@@ -3113,7 +3566,7 @@ async function copyText(text, okMsg) {
   return ok;
 }
 function entryToText(h) {
-  const label = h.type === 'REST' ? 'REST DAY' : (EXERCISE_DB[h.type] ? EXERCISE_DB[h.type].label : h.type);
+  const label = h.type === 'REST' ? 'REST DAY' : historySessionName(h);
   const lines = ['WorkoutApp \u2014 ' + label];
   let when = h.date;
   if (h.startedAt) {
@@ -3152,17 +3605,74 @@ const BACKUP_KEYS = ['settings', 'history', 'exerciseMods', 'customExercises', '
 function buildBackup() {
   const data = {};
   BACKUP_KEYS.forEach((k) => { const v = Store.get(k, undefined); if (v !== undefined && v !== null) data[k] = v; });
-  return JSON.stringify({ app: 'WorkoutApp', schemaVersion: SCHEMA_VERSION, exportedAt: new Date().toISOString(), data });
+  if (DS.mode === 'gen') { // the full export also carries the plan and the Quarantine
+    const pl = dsOpen(Store.rawRead(dsKey(DS.gen, 'plan'))); if (pl) data.plan = { sessions: pl.sessions, warmupLibrary: pl.warmupLibrary || [] };
+    const qq = dsQuarantineGet(); if (qq.length) data.quarantine = qq;
+  }
+  return JSON.stringify({ app: 'WorkoutApp', schemaVersion: schemaNow(), exportedAt: new Date().toISOString(), data });
 }
-function exportData() { copyText(buildBackup(), 'BACKUP COPIED'); }
-function openImport() { state.importOpen = true; state.importPreview = null; state.importDraft = ''; render(); }
-function closeImport() { state.importOpen = false; state.importPreview = null; render(); }
+function exportData() { copyText(buildBackup(), 'BACKUP COPIED'); Store.set('lastExport', new Date().toISOString()); }
+function openImport() {
+  state.importOpen = true; state.importPreview = null; state.importDraft = '';
+  if (DS.mode === 'gen') { state.dsOpen = true; state.ds = { view: 'import', stack: [], src: null, dry: null, report: null, confirmDel: null, confirmQ: false }; } // generation mode: the Recovery Center reviews every import first
+  render();
+}
+function closeImport() { state.importOpen = false; state.importPreview = null; state.dsOpen = false; state.ds = null; render(); }
+const DS_WARM_TIME = [5, 600], DS_WARM_REPS = [1, 100]; // seconds per TIME exercise, repetitions per REPS exercise
+function dsWarmItemsClean(arr) { // normalised copy of a warm-up exercise list, or null when anything in it is invalid
+  if (!Array.isArray(arr)) return null;
+  const out = [];
+  for (const w of arr) {
+    if (!dsIsObj(w) || typeof w.name !== 'string') return null;
+    const name = w.name.trim();
+    if (name.length < 1 || name.length > 60) return null;
+    const type = w.type === undefined ? 'TIME' : w.type; // older routines (WARMUP_DB) have only name + duration: they are timed exercises
+    if (type === 'TIME') { if (!Number.isInteger(w.duration) || w.duration < DS_WARM_TIME[0] || w.duration > DS_WARM_TIME[1]) return null; }
+    else if (type === 'REPS') { if (!Number.isInteger(w.reps) || w.reps < DS_WARM_REPS[0] || w.reps > DS_WARM_REPS[1]) return null; } // a REPS exercise needs no duration
+    else return null;
+    out.push(Object.assign({}, w, { name, type }));
+  }
+  return out;
+}
+function dsValidatePlan(p) { // {ok, plan} or {ok:false, reason}; never throws. Names are checked after trim(); stored trimmed.
+  const nameOk = (n) => typeof n === 'string' && n.trim().length >= 1 && n.trim().length <= 24;
+  if (!dsIsObj(p)) return { ok: false, reason: 'PLAN_NOT_AN_OBJECT' };
+  if (!Array.isArray(p.sessions) || p.sessions.length < 1 || p.sessions.length > 12) return { ok: false, reason: 'SESSIONS_MISSING_OR_OVER_12' };
+  const ids = new Set(), names = new Set(), sessions = [];
+  for (const x of p.sessions) {
+    if (!dsIsObj(x) || typeof x.id !== 'string' || !/^[A-Za-z0-9_-]{1,40}$/.test(x.id) || ids.has(x.id)) return { ok: false, reason: 'SESSION_ID_INVALID_OR_DUPLICATE' };
+    if (!nameOk(x.name) || names.has(x.name.trim().toLowerCase())) return { ok: false, reason: 'SESSION_NAME_INVALID_OR_DUPLICATE' }; // session names are unique ignoring letter case
+    let warmup = null;
+    if (x.warmup !== null) {
+      const items = dsIsObj(x.warmup) ? dsWarmItemsClean(x.warmup.items) : null;
+      if (!items) return { ok: false, reason: 'WARMUP_INVALID' };
+      warmup = Object.assign({}, x.warmup, { items });
+    }
+    ids.add(x.id); names.add(x.name.trim().toLowerCase());
+    sessions.push(Object.assign({}, x, { name: x.name.trim(), warmup }));
+  }
+  let warmupLibrary = [];
+  if (p.warmupLibrary !== undefined) {
+    if (!Array.isArray(p.warmupLibrary)) return { ok: false, reason: 'WARMUP_LIBRARY_INVALID' };
+    const routineNames = new Set();
+    for (const r of p.warmupLibrary) {
+      if (!dsIsObj(r)) return { ok: false, reason: 'WARMUP_LIBRARY_INVALID' };
+      if (!nameOk(r.name) || routineNames.has(r.name.trim())) return { ok: false, reason: 'WARMUP_LIBRARY_NAME_INVALID_OR_DUPLICATE' }; // routine names are unique, letter case counts
+      const items = dsWarmItemsClean(r.items);
+      if (!items) return { ok: false, reason: 'WARMUP_LIBRARY_INVALID' };
+      routineNames.add(r.name.trim());
+      warmupLibrary.push(Object.assign({}, r, { name: r.name.trim(), items }));
+    }
+  }
+  return { ok: true, plan: { sessions, warmupLibrary } };
+}
 function buildImportPlan(text) {
   let parsed;
   try { parsed = JSON.parse(text); } catch (e) { return { error: 'INVALID BACKUP' }; }
   const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
-  const data = parsed && parsed.app === 'WorkoutApp' && isObj(parsed.data) ? parsed.data : null;
+  const data = parsed && (parsed.app === 'WorkoutApp' || parsed.app === 'WOH') && isObj(parsed.data) ? parsed.data : null; // both names: older backups say WorkoutApp, newer ones WOH
   if (!data) return { error: 'INVALID BACKUP' };
+  if (parsed.schemaVersion !== undefined && !(Number.isInteger(parsed.schemaVersion) && parsed.schemaVersion >= 1 && parsed.schemaVersion <= SCHEMA_VERSION)) return { error: 'UNSUPPORTED BACKUP VERSION' }; // a file from a newer app, or a damaged number, is refused
   const next = {}, report = { records: null, skipped: 0, settings: false, mods: null, added: null, theme: false, studio: null };
   if (data.settings !== undefined) {
     if (!isObj(data.settings)) return { error: 'INVALID SETTINGS' };
@@ -3175,7 +3685,7 @@ function buildImportPlan(text) {
     if (!Array.isArray(data.history)) return { error: 'INVALID HISTORY' };
     const seen = new Set(), valid = [];
     data.history.forEach((h) => {
-      if (!isObj(h) || !(h.type === 'REST' || EXERCISE_DB[h.type]) || !isValidDateStr(h.date) || h.status !== 'COMPLETED') return;
+      if (!(DS.mode === 'gen' ? dsHistValid(h) : (isObj(h) && (h.type === 'REST' || EXERCISE_DB[h.type]) && isValidDateStr(h.date) && h.status === 'COMPLETED'))) return;
       const key = h.type === 'REST' ? 'R|' + h.date : (isNum(h.startedAt) ? h.type + '|' + h.startedAt : null);
       if (key) { if (seen.has(key)) return; seen.add(key); }
       valid.push(h);
@@ -3183,7 +3693,7 @@ function buildImportPlan(text) {
     if (data.history.length > 0 && valid.length === 0) return { error: 'NO VALID RECORDS' }; // never wipe history with an unusable file
     const kept = sortHistory(valid).slice(0, HISTORY_CAP);
     compactHistory(kept); // same newest-first order and condensing rule as normal saves
-    next.history = kept; report.records = kept.length; report.skipped = data.history.length - valid.length;
+    next.history = DS.mode === 'gen' ? data.history.slice() : kept; report.records = kept.length; report.skipped = data.history.length - valid.length; // generation mode: the Recovery engine sorts, limits and classifies every record itself
   }
   let rawMods = data.exerciseMods;
   if (rawMods === undefined && isObj(data.exerciseSwaps)) rawMods = swapsToMods(data.exerciseSwaps); // older backups
@@ -3202,8 +3712,17 @@ function buildImportPlan(text) {
     if (t) { next.theme = t.store; report.studio = { customs: t.store.customs.length, dropped: t.dropped }; }
     else report.studio = { customs: 0, dropped: 0, ignored: true };
   }
-  if (!Object.keys(next).length) return { error: 'NOTHING TO IMPORT' };
-  return { next, report };
+  let quarantine;
+  if (DS.mode === 'gen') { // plan and Quarantine sections exist only in generation-mode backups
+    if (data.plan !== undefined) {
+      const pv = dsValidatePlan(data.plan);
+      if (pv.ok) { next.plan = pv.plan; report.plan = true; }
+      else report.planIgnored = pv.reason; // only this section is refused; the valid sections are still imported and the current plan is kept
+    }
+    if (Array.isArray(data.quarantine)) quarantine = data.quarantine.filter((q) => isObj(q) && typeof q.qid === 'string' && typeof q.reason === 'string' && 'record' in q);
+  }
+  if (!Object.keys(next).length && !(quarantine && quarantine.length)) return { error: report.planIgnored ? 'NOTHING VALID TO IMPORT' : 'NOTHING TO IMPORT' };
+  return { next, report, quarantine };
 }
 function applyImport() { // step 1: validate and show a summary. Nothing is changed yet.
   const el = document.getElementById('import-input');
@@ -3211,15 +3730,22 @@ function applyImport() { // step 1: validate and show a summary. Nothing is chan
   state.importDraft = text;
   const plan = buildImportPlan(text);
   if (plan.error) { showToast(plan.error); return; }
+  if (state.dsOpen && DS.mode === 'gen') { dsStartRecovery({ kind: 'backup', plan }); return; } // review (Dry Run) before anything is written
   state.importPreview = plan;
   render();
 }
-function backToImportEdit() { state.importPreview = null; render(); }
+function backToImportEdit() { if (state.dsOpen) { dsBack(); return; } state.importPreview = null; render(); }
 function commitImport() { // step 2: the user confirmed the summary
   const p = state.importPreview;
   if (!p) return;
+  if (DS.mode === 'gen') { // generation mode: whatever the path, an import is ONE new generation made by the Recovery engine, never separate writes
+    const r = recoveryApply({ kind: 'backup', plan: p }, null, 'IMPORT');
+    state.importOpen = false; state.importPreview = null; state.importDraft = ''; state.dsOpen = false; state.ds = null;
+    initAccentTheme(); render(); showToast(r.ok ? 'IMPORTED' + (p.report.records !== null ? ' \u00b7 ' + p.report.records + ' RECORDS' : '') : 'NOT IMPORTED \u00b7 NOTHING CHANGED');
+    return;
+  }
   Object.keys(p.next).forEach((k) => Store.set(k, p.next[k]));
-  Store.set('schemaVersion', SCHEMA_VERSION);
+  Store.set('schemaVersion', schemaNow());
   initAccentTheme();
   state.importOpen = false; state.importPreview = null; state.importDraft = '';
   render();
@@ -3243,10 +3769,153 @@ function renderImportPreview() {
   </div></div>`;
 }
 
+// ---------- DATA SAFETY screen + Recovery Center (overlay inside Settings; Back is handled by the existing import-overlay rules) ----------
+function dsLastReport() { try { const raw = Store.rawRead('wa_recovery_last'); return raw === null ? null : JSON.parse(raw); } catch (e) { return null; } }
+function openDataSafety() { state.importOpen = true; state.dsOpen = true; state.ds = { view: 'main', stack: [], src: null, dry: null, report: null, confirmDel: null, confirmQ: false }; state.importPreview = null; render(); }
+function dsNav(view) { state.ds.stack.push(state.ds.view); state.ds.view = view; state.importPreview = { ds: true }; state.ds.confirmDel = null; state.ds.confirmQ = false; render(); }
+function dsBack() {
+  if (!state.ds || !state.ds.stack.length) { closeImport(); return; }
+  state.ds.view = state.ds.stack.pop(); state.ds.confirmDel = null; state.ds.confirmQ = false;
+  state.importPreview = state.ds.stack.length ? { ds: true } : null; // a non-null preview makes the Android Back button step back instead of closing
+  render();
+}
+function dsFmtDate(ts) { return ts ? localDateStr(new Date(ts)) : '\u2014'; }
+function dsKB(chars) { return (chars / 1024).toFixed(chars > 10240 ? 0 : 1) + ' KB'; }
+function dsStartRecovery(src) {
+  if (!state.ds) return;
+  state.ds.src = src; state.ds.dry = recoveryDryRun(src); state.ds.report = null;
+  dsNav('summary');
+}
+function dsRestoreGen(gen) { dsStartRecovery(gen === 0 ? { kind: 'legacy' } : { kind: 'generation', gen }); }
+function dsConfirmStep() { if (state.ds && state.ds.dry && state.ds.dry.ok && !state.ds.dry.blocked) dsNav('confirm'); }
+function dsExecute() {
+  const d = state.ds; if (!d || !d.dry) return;
+  const r = recoveryApply(d.src, d.dry.hash, d.src.kind === 'backup' ? 'IMPORT' : 'RESTORE');
+  d.report = r.report; d.stack = []; d.view = 'report'; state.importPreview = { ds: true };
+  if (r.ok) { initAccentTheme(); showToast('DONE'); }
+  render();
+}
+function dsDeleteStep(gen) {
+  const d = state.ds; if (!d || !dsCanDelete(gen)) return;
+  if (d.confirmDel !== gen) { d.confirmDel = gen; render(); return; }
+  d.confirmDel = null;
+  showToast(dsDeleteGeneration(gen) ? 'DELETED' : 'COULD NOT DELETE'); render();
+}
+function dsCopyDetails() { if (state.ds && state.ds.dry && state.ds.dry.detailsText) copyText(state.ds.dry.detailsText, 'DETAILS COPIED'); }
+function dsCopyReport() { const r = state.ds && state.ds.report ? state.ds.report : dsLastReport(); if (r) copyText(dsReportText(r), 'REPORT COPIED'); }
+function dsCopyQuarantine() { const t = dsQuarantineText(); if (t) copyText(t, 'QUARANTINE COPIED'); }
+function dsQuarantineStep() {
+  const d = state.ds; if (!d) return;
+  if (!d.confirmQ) { d.confirmQ = true; render(); return; }
+  d.confirmQ = false; showToast(dsQuarantineDelete(dsQuarantineGet().map((q) => q.qid)) ? 'DELETED' : 'COULD NOT DELETE'); render();
+}
+function dsViewLastReport() { if (state.ds && dsLastReport()) { state.ds.report = dsLastReport(); dsNav('report'); } }
+const DS_MESSAGES = {
+  NOT_ENOUGH_SPACE: 'NOT ENOUGH STORAGE SPACE. Nothing was changed. Export a backup, then delete an old generation below.',
+  WORKOUT_RUNNING: 'A workout is running. Finish or discard it first. Nothing was changed.',
+  CHANGED_SINCE_PREVIEW: 'The data changed after the preview. Nothing was changed. Review again.',
+  SOURCE_UNREADABLE: 'This source is damaged and cannot be read. Nothing was changed.',
+  CURRENT_UNREADABLE: 'The current data cannot be read. Nothing was changed.',
+  CONSERVATION_FAILED: 'The safety check could not account for every record. Nothing was changed.',
+  GENERATIONS_UNAVAILABLE: 'Generation discovery is temporarily unavailable: the list of stored keys could not be read. Creating a generation, restoring, importing and deleting generations are paused. Nothing was changed.', SCAN_UNAVAILABLE: 'Generation discovery is temporarily unavailable. Nothing was changed.',
+  NO_GENERATIONS: 'Data Safety is not active on this device.', NOTHING_VALID: 'Nothing valid to restore.', LEGACY_UNREADABLE: 'The original data is damaged and cannot be read.', LEGACY_SHAPE: 'The original data has an unexpected format.',
+};
+const dsMsg = (code) => DS_MESSAGES[code] || ('Stopped at ' + code + '. Nothing was changed.');
+const DS_ROLE = { CURRENT: 'IN USE', PREVIOUS: 'PREVIOUS', OLDER: 'OLDER', ORPHAN: 'UNFINISHED', ORIGINAL: 'ORIGINAL', AVAILABLE: 'VERIFIED', DAMAGED: 'DAMAGED' };
+const DS_PLAN_REASONS = { PLAN_NOT_AN_OBJECT: 'the plan section is not a valid object', SESSIONS_MISSING_OR_OVER_12: 'the session list is missing or has more than 12 sessions', SESSION_ID_INVALID_OR_DUPLICATE: 'a session id is invalid or repeated', SESSION_NAME_INVALID_OR_DUPLICATE: 'a session name is empty, longer than 24 characters, or repeated (letter case ignored)', WARMUP_INVALID: 'a session warm-up is invalid (an exercise has a bad name, type, time of 5-600 s, or 1-100 reps)', WARMUP_LIBRARY_INVALID: 'the warm-up library is invalid (an exercise has a bad name, type, time of 5-600 s, or 1-100 reps)', WARMUP_LIBRARY_NAME_INVALID_OR_DUPLICATE: 'a warm-up routine name is not 1-24 characters or is repeated' };
+const dsIgnoredHtml = (list) => (list || []).map((x) => `<p class="p-note">${esc(x.section)} was ignored: ${esc(DS_PLAN_REASONS[x.reason] || x.reason)}. Your current ${esc(x.section.toLowerCase())} was kept.</p>`).join('');
+function dsRowsHtml(rows) {
+  return '<div class="ds-rows">' + rows.map((r) => `<div class="ds-row"><b>${esc(r.section)}</b><span>${esc(r.before)} \u2192 ${esc(r.after)}</span><i>${r.status === 'SAME' ? 'NO CHANGE' : (r.status === 'KEPT' ? 'KEPT AS IS' : 'WILL CHANGE')}</i></div>`).join('') + '</div>';
+}
+function renderDsMain() {
+  const rawGens = dsListGenerationsRaw(), used = dsUsedChars(), cap = dsCapacity();
+  const scanDown = rawGens === null || used === null || !dsScanAvailable(), gens = rawGens || [], q = dsQuarantineGet().length, last = Store.get('lastExport', null), lr = dsLastReport();
+  let h = `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('settings', 22)}</div><div class="overlay-title">DATA SAFETY</div>`;
+  if (DS.mode === 'gen') h += `<p class="confirm-body swap-body">Your data is in generation ${DS.gen}. Earlier generations are kept as backups and are never deleted automatically.</p>`;
+  else if (DS.mode === 'degraded') h += `<p class="confirm-body swap-body">The data pointer is damaged, so changes are paused to protect your data. ${gens.some((g) => g.ok) ? 'A verified generation below can be restored as a new generation; nothing is overwritten or deleted.' : 'No verified generation was found, so the app stays read-only. You can still export what is visible.'}</p>`;
+  else h += '<p class="confirm-body swap-body">Safe storage is not active on this device (storage is unavailable or the upgrade has not completed). Your data stays as it was.</p>';
+  const mig = DS.mode === 'gen' ? (dsOpen(Store.rawRead(dsKey(DS.gen, 'plan'))) || {}).meta : null;
+  if (mig && mig.migration && mig.migration.quarantined) h += `<p class="p-note">The upgrade moved ${mig.migration.quarantined} of ${mig.migration.total} old records to Quarantine because they were invalid or over the limit. Nothing was deleted.</p>`;
+  if (scanDown) h += '<p class="confirm-body swap-body"><b>GENERATION DISCOVERY IS TEMPORARILY UNAVAILABLE.</b> The list of stored keys could not be read, so creating a generation, restoring, importing and deleting generations are paused. Your data was not changed. Saving workouts and settings still works. Close and reopen the app; if this stays, export a backup.</p>';
+  DS.notices.forEach((n) => { h += `<p class="p-note">${esc(n.code === 'POINTER_RECOVERED' ? 'The main pointer was damaged; the previous one was used.' : (n.code === 'MIGRATION_FAILED' ? 'The storage upgrade could not finish (' + n.step + '). Your data stays as it was.' : n.code))}</p>`; });
+  if (DS.orphans.length) h += `<p class="p-note">Unfinished generation(s) found: ${DS.orphans.join(', ')}. They are not used. You can delete them below.</p>`;
+  h += `<p class="p-note">${used === null ? 'Storage estimate unavailable right now (the stored generations cannot be counted).' : 'Storage used: about ' + dsKB(used) + ' of an estimated ' + dsKB(cap) + '.'} Last export: ${last ? esc(String(last).slice(0, 10)) : 'never'}.</p>`;
+  h += '<div class="ds-gens">' + gens.map((g) => `<div class="ds-gen"><div><b>${g.gen === 0 ? 'ORIGINAL DATA' : 'GENERATION ' + g.gen}</b> <i>${DS_ROLE[g.role] || ''}${g.ok ? '' : ' \u00b7 DAMAGED'}</i><br><small>${g.history === null ? 'unreadable' : g.history + ' records'} \u00b7 ${dsKB(g.chars)} \u00b7 ${dsFmtDate(g.ts)}</small></div>
+    <div class="ds-actions">${g.role !== 'CURRENT' && g.role !== 'ORPHAN' && g.ok ? `<button class="pill-btn" onclick="dsRestoreGen(${g.gen})">RESTORE</button>` : ''}${dsCanDelete(g.gen) || (g.role === 'ORPHAN' && DS.mode === 'gen') ? `<button class="pill-btn" onclick="dsDeleteStep(${g.gen})">${state.ds.confirmDel === g.gen ? 'TAP AGAIN TO DELETE' : 'DELETE'}</button>` : ''}</div></div>`).join('') + '</div>';
+  h += `<div class="confirm-row"><button class="ghost-btn" onclick="exportData()"><span>EXPORT BACKUP</span></button><button class="ghost-btn" ${scanDown ? 'disabled' : ''} onclick="dsNav('import')"><span>IMPORT BACKUP</span></button></div>`;
+  h += `<div class="confirm-row"><button class="ghost-btn" onclick="dsNav('quarantine')"><span>QUARANTINE (${q})</span></button><button class="ghost-btn" ${lr ? '' : 'disabled'} onclick="dsViewLastReport()"><span>LAST REPORT</span></button></div>`;
+  h += '<div class="confirm-row"><button class="primary-btn" onclick="closeImport()"><span>CLOSE</span></button></div></div></div>';
+  return h;
+}
+function renderDsSummary() {
+  const d = state.ds.dry, isImport = state.ds.src.kind === 'backup';
+  let h = `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon(isImport ? 'upload' : 'download', 22)}</div><div class="overlay-title">${isImport ? 'REVIEW IMPORT' : 'REVIEW RESTORE'}</div>`;
+  if (!d.ok) {
+    h += `<p class="confirm-body swap-body">${esc(dsMsg(d.errors[0]))}</p>${d.space && !d.space.ok && !d.space.unavailable ? `<p class="p-note">Needed about ${dsKB(d.space.needed)} more; about ${dsKB(Math.max(0, d.space.capacity - d.space.used))} free (estimate).</p>` : ''}`;
+    h += '<div class="confirm-row"><button class="primary-btn" onclick="dsBack()"><span>BACK</span></button></div></div></div>';
+    return h;
+  }
+  h += `<p class="confirm-body swap-body">This was checked without changing anything. Source: ${esc(d.label)}.</p>${dsRowsHtml(d.rows)}`;
+  const c = d.counts;
+  h += `<p class="confirm-body swap-body"><b>${c.stay}</b> workout/rest records stay in History \u00b7 <b>${c.identical}</b> identical copies are ignored \u00b7 <b>${c.quarantine}</b> are moved to Quarantine (kept, never deleted automatically).</p>`;
+  if (c.quarantine) h += `<p class="p-note">Quarantine: ${c.notInSource} not in the source \u00b7 ${d.cls ? d.cls.conflicts.length : 0} conflicting versions \u00b7 ${c.overflow} over the 1500 limit \u00b7 ${c.invalid} invalid or duplicate.</p>`;
+  if (d.details.settings.length) h += `<p class="p-note">Settings that change: ${d.details.settings.length}.</p>`;
+  if (d.details.themeChanged) h += '<p class="p-note">Theme settings will change.</p>';
+  h += dsIgnoredHtml(d.ignored);
+  if (d.blocked) h += `<p class="p-note">${esc(dsMsg(d.blocked))}</p>`;
+  h += `<p class="p-note">Your current data is kept as generation ${DS.gen}, a backup you can restore.</p>`;
+  h += `<div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="ghost-btn" onclick="dsCopyDetails()"><span>COPY DETAILS</span></button></div>`;
+  h += `<div class="confirm-row"><button class="primary-btn" ${d.blocked ? 'disabled' : ''} onclick="dsConfirmStep()"><span>CONTINUE</span></button></div></div></div>`;
+  return h;
+}
+function renderDsConfirm() {
+  const d = state.ds.dry, isImport = state.ds.src.kind === 'backup';
+  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon(isImport ? 'upload' : 'download', 22)}</div><div class="overlay-title">${isImport ? 'IMPORT NOW?' : 'RESTORE NOW?'}</div>
+    <p class="confirm-body swap-body">This creates generation ${dsNextGen() === null ? '(number unavailable right now)' : dsNextGen()} with the result you reviewed. ${d.counts.quarantine} record(s) go to Quarantine. If anything fails before the switch, nothing changes.</p>
+    <div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="primary-btn" onclick="dsExecute()"><span>${isImport ? 'IMPORT' : 'RESTORE'}</span></button></div></div></div>`;
+}
+function renderDsReport() {
+  const r = state.ds.report;
+  const msg = r.outcome === 'COMMITTED' ? 'Completed. Everything was verified.' : (r.outcome === 'FAILED' ? 'Failed at step ' + r.reason + '. Your data was not changed.' : dsMsg(r.reason));
+  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('list', 22)}</div><div class="overlay-title">RECOVERY REPORT</div>
+    <p class="confirm-body swap-body"><b>${esc(r.outcome)}</b> \u00b7 ${esc(r.type)} \u00b7 ${esc(r.source)}</p><p class="p-note">${esc(msg)}</p>${dsRowsHtml(r.rows || [])}
+    ${dsIgnoredHtml(r.ignored)}
+    ${r.counts ? `<p class="p-note">${r.counts.stay} stay \u00b7 ${r.counts.identical} identical ignored \u00b7 ${r.counts.quarantine} to Quarantine</p>` : ''}
+    ${(r.integrity || []).length ? `<p class="p-note">Checks: ${r.integrity.every((x) => x.ok) ? 'all passed' : 'some failed'}</p>` : ''}
+    <p class="p-note">Generation ${r.genBefore} \u2192 ${r.genAfter}. ${r.saved ? 'Report saved.' : 'The report could not be saved: copy it now.'}</p>
+    <div class="confirm-row"><button class="ghost-btn" onclick="dsCopyReport()"><span>COPY REPORT</span></button><button class="primary-btn" onclick="closeImport()"><span>DONE</span></button></div></div></div>`;
+}
+function renderDsQuarantine() {
+  const items = dsQuarantineGet();
+  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('list', 22)}</div><div class="overlay-title">QUARANTINE</div>
+    <p class="confirm-body swap-body">${items.length} item(s). These records could not be placed in your History. They are kept until you delete them.</p>
+    ${items.slice(0, 20).map((q) => `<p class="p-note">${esc(q.reason)} \u00b7 ${esc(dsIsObj(q.record) ? String(q.record.date) + ' \u00b7 ' + historySessionName(q.record) : 'unreadable record')}</p>`).join('')}${items.length > 20 ? `<p class="p-note">\u2026 and ${items.length - 20} more (use COPY ALL).</p>` : ''}
+    <div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="ghost-btn" ${items.length ? '' : 'disabled'} onclick="dsCopyQuarantine()"><span>COPY ALL</span></button></div>
+    <div class="confirm-row"><button class="ghost-btn" ${items.length ? '' : 'disabled'} onclick="dsQuarantineStep()"><span>${state.ds.confirmQ ? 'TAP AGAIN TO DELETE ALL' : 'DELETE ALL'}</span></button></div></div></div>`;
+}
+function renderDataSafety() {
+  const v = state.ds.view;
+  if (v === 'summary') return renderDsSummary();
+  if (v === 'confirm') return renderDsConfirm();
+  if (v === 'report') return renderDsReport();
+  if (v === 'quarantine') return renderDsQuarantine();
+  if (v === 'import') return renderImportOverlay();
+  return renderDsMain();
+}
+function renderSaveFailed() {
+  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('list', 22)}</div><div class="overlay-title">WORKOUT NOT SAVED</div>
+    <p class="confirm-body swap-body">The record could not be stored on this device. Your workout is still here and nothing was deleted.</p>
+    <p class="p-note">Free some space (for example delete an old generation in Settings, DATA SAFETY) and try again, or copy the summary now.</p>
+    <div class="confirm-row"><button class="ghost-btn" onclick="copyText(entryToText(state.saveFailed.entry), 'SUMMARY COPIED')"><span>COPY SUMMARY</span></button><button class="primary-btn" onclick="finishWorkout()"><span>TRY AGAIN</span></button></div></div></div>`;
+}
+
 // ---------- Init ----------
 // Guard against scripts that execute after DOMContentLoaded has already fired
 // (e.g. when injected post-parse) by rendering immediately in that case.
-function init() { migrateData(); initAccentTheme(); render(); }
+function init() {
+  try { dsInit(); } catch (e) { DS.mode = 'legacy'; DS.gen = 0; Store.setRouter(null); DS.notices.push({ code: 'INIT_ERROR' }); } // Data Safety can never keep the app from starting
+  migrateData(); initAccentTheme(); render();
+}
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
 } else {

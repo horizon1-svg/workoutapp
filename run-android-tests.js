@@ -21,7 +21,7 @@ function make(opts) {
   const roots = {}, toasts = [], events = [], listeners = {}, fields = {}; let exited = 0;
   const mk = () => ({ style: { setProperty() {} }, classList: { add() {}, remove() {} }, _h: '', get innerHTML() { return this._h; }, set innerHTML(v) { this._h = v; }, addEventListener() {}, appendChild() {}, removeChild() {}, setAttribute() {}, firstElementChild: null, querySelector: () => null, focus() {}, select() {} });
   const doc = { visibilityState: 'visible', body: { appendChild: (el) => toasts.push(el.textContent) }, getElementById: (id) => fields[id] || (roots[id] = roots[id] || mk()), querySelector: mk, querySelectorAll: () => [], createElement: () => Object.assign(mk(), { className: '', textContent: '', value: '' }), addEventListener() {}, dispatchEvent: (e) => { events.push(e.type); return true; }, documentElement: mk(), readyState: 'complete' };
-  const c = { console, setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, Date: FD, Math, Event: function (t) { this.type = t; }, localStorage: { getItem: (k) => store[k] ?? null, setItem: (k, v) => { store[k] = v; }, removeItem: (k) => { delete store[k]; } }, document: doc, navigator: {}, addEventListener() {}, requestAnimationFrame() {}, AudioContext: function () {} };
+  const c = { console, setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, Date: FD, Math, Event: function (t) { this.type = t; }, localStorage: { getItem: (k) => store[k] ?? null, key: (i) => (Object.keys(store)[i] === undefined ? null : Object.keys(store)[i]), get length() { return Object.keys(store).length; }, setItem: (k, v) => { store[k] = v; }, removeItem: (k) => { delete store[k]; } }, document: doc, navigator: {}, addEventListener() {}, requestAnimationFrame() {}, AudioContext: function () {} };
   c.window = c; c.toasts = toasts; c.events = events; c.listeners = listeners; c.store = store; c.advance = (ms) => { clock.t += ms; }; c.exitCount = () => exited;
   if (opts.capacitor !== false) c.Capacitor = { isNativePlatform: () => opts.native !== false, Plugins: { App: { addListener(ev, fn) { listeners[ev] = fn; return Promise.resolve({ remove() {} }); }, exitApp() { exited++; } } } };
   vm.createContext(c);
@@ -216,6 +216,24 @@ ok('no workflow commits a release key or passes secrets on the command line', !/
 const parent = path.join(ROOT, '..');
 const sameAsTested = fs.existsSync(path.join(parent, 'app.js')) ? ['app.js', 'data.js', 'icons.js', 'style.css'].every((f) => md5(path.join(ROOT, f)) === md5(path.join(parent, f))) : true;
 ok('the web app files in this project are identical to the ones tested as the web version', sameAsTested);
+
+// ---- Phase 3A: DATA SAFETY / Recovery Center screens and the real Android Back handler ----
+c = make(); run(c, "goSettings();openDataSafety()");
+ok('DATA SAFETY: opens as an overlay on Settings', run(c, 'state.importOpen && state.dsOpen && state.ds.view') === 'main' && scr(c) === 'settings');
+back(c); ok('DATA SAFETY: Back closes it and stays on Settings', run(c, 'state.importOpen') === false && run(c, 'state.dsOpen') === false && scr(c) === 'settings');
+back(c); ok('DATA SAFETY: the next Back goes to Home', scr(c) === 'home');
+c = make(); run(c, "goSettings();openDataSafety();dsRestoreGen(1);dsConfirmStep()");
+ok('Recovery Center: review and confirm steps are open', run(c, 'state.ds.view') === 'confirm');
+back(c); ok('Recovery Center: Back from confirm returns to the review', run(c, 'state.ds.view') === 'summary' && run(c, 'state.importOpen') === true);
+back(c); ok('Recovery Center: Back from the review returns to DATA SAFETY', run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true);
+back(c); ok('Recovery Center: Back from DATA SAFETY closes it', run(c, 'state.importOpen') === false && scr(c) === 'settings');
+c = make(); run(c, "goSettings();openDataSafety();dsRestoreGen(1);dsConfirmStep();dsExecute()");
+ok('Recovery Center: the report is shown after the operation', run(c, 'state.ds.view') === 'report' && run(c, 'state.ds.report.outcome') === 'COMMITTED');
+back(c); ok('Recovery Center: Back from the report closes everything', run(c, 'state.importOpen') === false && scr(c) === 'settings');
+c = make(); run(c, "goSettings();openImport()");
+ok('Import (generation mode) opens the Recovery Center import step and Back closes it', run(c, 'state.ds.view') === 'import'); back(c); ok('Import: Back closes the overlay', run(c, 'state.importOpen') === false && scr(c) === 'settings');
+c = make(); run(c, "goSettings();openDataSafety();dsNav('quarantine')"); back(c);
+ok('Quarantine screen: Back returns to DATA SAFETY', run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true);
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 if (fail) { console.log('\nFAILED:\n- ' + failures.join('\n- ')); process.exit(1); }
