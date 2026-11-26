@@ -1344,3 +1344,18 @@ html.fx-noblur * { backdrop-filter: none !important; -webkit-backdrop-filter: no
 .ds-gen i { font-style: normal; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; color: var(--accent); }
 .ds-gen small { color: var(--text-secondary); font-size: 10px; }
 .ds-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+
+/* ---- Data Safety full screen (phase 3.1A UI polish): layout only; colours come from theme variables ---- */
+.ds-screen .confirm-body, .ds-screen .swap-body { margin: 0 0 12px; text-align: left; }
+.ds-screen .p-note { margin: 8px 0; text-align: left; }
+.ds-card { margin-top: 0; }
+.ds-card > :first-child { margin-top: 0; }
+.ds-card > :last-child { margin-bottom: 0; }
+.ds-screen .ds-gens { margin: 0 0 4px; }
+.ds-gen > div:first-child { flex: 1; min-width: 0; line-height: 1.5; }
+.ds-actions { flex: 0 0 auto; align-items: stretch; min-width: 96px; max-width: 132px; }
+/* In this column the shared .pill-btn flex-basis (120px) became a HEIGHT, which made RESTORE huge; fixed size and no growth here. */
+.ds-actions .pill-btn { flex: 0 0 auto; height: auto; min-height: 32px; padding: 6px 12px; font-size: 10.5px; line-height: 1.15; white-space: normal; text-align: center; }
+.pill-btn.danger { background: transparent; border-style: dashed; color: var(--text-secondary); }
+.pill-btn.danger.armed { background: var(--accent-soft); border-style: solid; border-color: var(--accent); color: var(--accent); }
+.ds-why { margin: -2px 2px 10px; }

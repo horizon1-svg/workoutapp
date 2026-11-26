@@ -22,6 +22,8 @@ function make(opts) {
   const mk = () => ({ style: { setProperty() {} }, classList: { add() {}, remove() {} }, _h: '', get innerHTML() { return this._h; }, set innerHTML(v) { this._h = v; }, addEventListener() {}, appendChild() {}, removeChild() {}, setAttribute() {}, firstElementChild: null, querySelector: () => null, focus() {}, select() {} });
   const doc = { visibilityState: 'visible', body: { appendChild: (el) => toasts.push(el.textContent) }, getElementById: (id) => fields[id] || (roots[id] = roots[id] || mk()), querySelector: mk, querySelectorAll: () => [], createElement: () => Object.assign(mk(), { className: '', textContent: '', value: '' }), addEventListener() {}, dispatchEvent: (e) => { events.push(e.type); return true; }, documentElement: mk(), readyState: 'complete' };
   const c = { console, setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, Date: FD, Math, Event: function (t) { this.type = t; }, localStorage: { getItem: (k) => store[k] ?? null, key: (i) => (Object.keys(store)[i] === undefined ? null : Object.keys(store)[i]), get length() { return Object.keys(store).length; }, setItem: (k, v) => { store[k] = v; }, removeItem: (k) => { delete store[k]; } }, document: doc, navigator: {}, addEventListener() {}, requestAnimationFrame() {}, AudioContext: function () {} };
+  if (opts.legacy) c.WA_DATA_SAFETY_AUTOSTART = false; // storage stays in the original (legacy) mode, as on a device where the upgrade has not run
+  c.setField = (id, v) => { fields[id] = { value: v, focus() {}, select() {} }; };
   c.window = c; c.toasts = toasts; c.events = events; c.listeners = listeners; c.store = store; c.advance = (ms) => { clock.t += ms; }; c.exitCount = () => exited;
   if (opts.capacitor !== false) c.Capacitor = { isNativePlatform: () => opts.native !== false, Plugins: { App: { addListener(ev, fn) { listeners[ev] = fn; return Promise.resolve({ remove() {} }); }, exitApp() { exited++; } } } };
   vm.createContext(c);
@@ -219,7 +221,7 @@ ok('the web app files in this project are identical to the ones tested as the we
 
 // ---- Phase 3A: DATA SAFETY / Recovery Center screens and the real Android Back handler ----
 c = make(); run(c, "goSettings();openDataSafety()");
-ok('DATA SAFETY: opens as an overlay on Settings', run(c, 'state.importOpen && state.dsOpen && state.ds.view') === 'main' && scr(c) === 'settings');
+ok('DATA SAFETY: opens as a full-screen screen reached from Settings (not an overlay)', run(c, 'state.importOpen && state.dsOpen && state.ds.view') === 'main' && scr(c) === 'dataSafety');
 back(c); ok('DATA SAFETY: Back closes it and stays on Settings', run(c, 'state.importOpen') === false && run(c, 'state.dsOpen') === false && scr(c) === 'settings');
 back(c); ok('DATA SAFETY: the next Back goes to Home', scr(c) === 'home');
 c = make(); run(c, "goSettings();openDataSafety();dsRestoreGen(1);dsConfirmStep()");
@@ -234,6 +236,36 @@ c = make(); run(c, "goSettings();openImport()");
 ok('Import (generation mode) opens the Recovery Center import step and Back closes it', run(c, 'state.ds.view') === 'import'); back(c); ok('Import: Back closes the overlay', run(c, 'state.importOpen') === false && scr(c) === 'settings');
 c = make(); run(c, "goSettings();openDataSafety();dsNav('quarantine')"); back(c);
 ok('Quarantine screen: Back returns to DATA SAFETY', run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true);
+
+// ---- Phase 3.1A: DATA SAFETY as a full-screen screen: Android Back from every view, legacy-mode import, leaving by the bottom bar, active workout ----
+for (const [name, call] of [['import step', "dsNav('import')"], ['restore review', 'dsRestoreGen(1)']]) {
+  c = make(); run(c, 'goSettings();openDataSafety();' + call); const inView = scr(c) === 'dataSafety' && run(c, 'state.ds.view') !== 'main';
+  back(c); ok('Android Back from the ' + name + ' returns to the DATA SAFETY main view, still on the screen', inView && run(c, 'state.ds.view') === 'main' && scr(c) === 'dataSafety' && c.exitCount() === 0);
+  back(c); ok('Android Back from the main view (after the ' + name + ') returns to Settings with nothing left open', scr(c) === 'settings' && run(c, 'state.importOpen || state.dsOpen || state.dsScreen') === false && run(c, 'state.ds') === null);
+}
+// legacy-mode import (the old Settings entry was the only working path): preview and cancellation, with Android Back
+const srcBk = run(make({ legacy: true }), 'buildBackup()');
+c = make({ legacy: true }); ok('(setup) legacy mode', run(c, 'DS.mode') === 'legacy');
+run(c, 'goSettings();openDataSafety();dsNav(\'import\')'); c.setField('import-input', srcBk.replace('"data":{', '"data":{"history":[{"type":"REST","date":"2026-09-01","status":"COMPLETED"}],'));
+const lg0 = JSON.stringify(c.store); run(c, 'applyImport()');
+ok('legacy import: the review appears inside the DATA SAFETY screen and nothing is written', scr(c) === 'dataSafety' && run(c, 'state.importPreview && !state.importPreview.ds') === true && run(c, 'renderDataSafety()').includes('REPLACE MY DATA') && JSON.stringify(c.store) === lg0);
+back(c); ok('legacy import: Android Back on the review returns to the paste step (cancels the review, nothing written)', scr(c) === 'dataSafety' && run(c, 'state.ds.view') === 'import' && run(c, 'state.importPreview.ds') === true && run(c, 'renderDataSafety()').includes('id="import-input"') && JSON.stringify(c.store) === lg0);
+back(c); ok('legacy import: Android Back on the paste step returns to the DATA SAFETY main view', scr(c) === 'dataSafety' && run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true);
+back(c); ok('legacy import: Android Back returns to Settings, storage still untouched', scr(c) === 'settings' && JSON.stringify(c.store) === lg0 && run(c, 'state.ds') === null);
+// leaving by the bottom bar: no stale import/overlay flags may stay behind (they would make the next Back or a later Settings visit misbehave)
+c = make(); run(c, "goSettings();openDataSafety();dsNav('quarantine');goHome()");
+ok('leaving DATA SAFETY through the bottom bar clears its flags', scr(c) === 'home' && run(c, 'state.importOpen || state.dsOpen || state.dsScreen') === false && run(c, 'state.ds') === null);
+back(c); ok('after that, Back on Home gives the exit hint (it is not swallowed by a stale import dialog)', c.toasts.includes('PRESS BACK AGAIN TO EXIT') && scr(c) === 'home');
+// an active workout survives opening, navigating and leaving DATA SAFETY with Android Back
+c = make(); run(c, "selectSession('PUSH_A');startWorkoutFlow();beginWarmupStep()"); back(c); run(c, 'confirmLeaveWorkout()');
+const awState = () => JSON.stringify({ a: run(c, "Store.get('activeSession', null)"), k: run(c, 'state.sessionKey'), ex: run(c, 'state.exerciseList'), cur: [run(c, 'state.curExerciseIdx'), run(c, 'state.curSet')] }), awStore = () => JSON.stringify(c.store);
+const aw0 = awState(), aws0 = awStore();
+ok('(setup) a workout is saved and resumable', scr(c) === 'home' && run(c, "!!Store.get('activeSession', null)") === true && run(c, 'renderHome()').includes('RESUME'));
+run(c, "goSettings();openDataSafety();dsNav('quarantine')"); back(c); back(c);
+ok('active workout: DATA SAFETY -> Quarantine -> Back x2 returns to Settings; the workout and every stored key are unchanged', scr(c) === 'settings' && awState() === aw0 && awStore() === aws0);
+run(c, "openDataSafety();dsRestoreGen(1)"); const blockedByWorkout = run(c, 'state.ds.dry.blocked') === 'WORKOUT_RUNNING'; back(c); back(c);
+ok('active workout: the restore review is blocked by the running workout, and Back out leaves it untouched', blockedByWorkout && scr(c) === 'settings' && awState() === aw0 && awStore() === aws0);
+run(c, 'goHome()'); ok('active workout: Home still offers RESUME afterwards', run(c, 'renderHome()').includes('RESUME') && awState() === aw0);
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed');
 if (fail) { console.log('\nFAILED:\n- ' + failures.join('\n- ')); process.exit(1); }

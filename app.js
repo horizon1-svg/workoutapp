@@ -1144,7 +1144,8 @@ let state = {
   warmupList: [],
   sessionName: null,   // Data Safety: name of the session as it was when this workout started (snapshot)
   saveFailed: null,    // set when the finished workout could not be stored; the workout is kept until it is saved
-  dsOpen: false, ds: null, // DATA SAFETY / Recovery Center overlay state
+  dsOpen: false, ds: null, // DATA SAFETY / Recovery Center view state
+  dsScreen: false, // true while the full-screen DATA SAFETY screen owns importOpen/dsOpen/ds; render() cleans them up when the screen is left by any route
   warmupIdx: 0,
   curExerciseIdx: 0,
   curSet: 1,
@@ -2573,6 +2574,9 @@ function render() {
   const app = document.getElementById('app');
   // Leaving Theme Studio by any route (back, nav bar, Android back) drops the unsaved draft and re-applies the saved theme.
   if (state.studio && state.screen !== 'themeStudio' && state.screen !== 'themeAdvanced') { state.studio = null; applyActiveTheme(); }
+  // Leaving DATA SAFETY by any route (nav bar, Back, Android back) clears its sub-state exactly like closeImport() does, so nothing is left open behind another screen.
+  if (state.dsScreen && state.screen !== 'dataSafety') { state.dsScreen = false; state.importOpen = false; state.importPreview = null; state.dsOpen = false; state.ds = null; }
+  if (state.screen === 'dataSafety' && !state.ds) state.screen = 'settings';
   const renderKey = state.screen + '|' + state.subState;
   const isNewView = renderKey !== lastRenderKey;
   lastRenderKey = renderKey;
@@ -2590,6 +2594,7 @@ function render() {
     case 'customMods': app.innerHTML = renderCustomMods(); break;
     case 'themeStudio': app.innerHTML = renderThemeStudio(); break;
     case 'themeAdvanced': app.innerHTML = renderThemeAdvanced(); break;
+    case 'dataSafety': app.innerHTML = renderDataSafety(); dsScreenAfterRender(app); break;
   }
   if (isNewView && app.firstElementChild) {
     app.firstElementChild.classList.add('fade-in');
@@ -2981,9 +2986,7 @@ function renderSettings() {
     ${link('goAdvancedSettings()', 'settings', 'ADVANCED', 'Rest, set, warm-up and countdown times', true)}
     ${link('goCustomMods()', 'edit', 'CUSTOMIZATION', 'Saved exercise changes and added exercises', true)}
     <div class="settings-group-title">DATA</div>
-    ${link('exportData()', 'download', 'EXPORT BACKUP', 'Copy your data to the clipboard', false)}
-    ${link('openImport()', 'upload', 'IMPORT BACKUP', 'Restore from a backup you exported', false)}
-    ${link('openDataSafety()', 'settings', 'DATA SAFETY', 'Generations, Quarantine and recovery', false)}
+    ${link('openDataSafety()', 'settings', 'DATA SAFETY', 'Backup, restore, generations and recovery', true)}
   </div>`;
 }
 
@@ -3070,17 +3073,20 @@ function renderModal() {
   }
 }
 
+function importPasteBody(cancelFn, track) { // paste step: shared by the old overlay and the DATA SAFETY screen
+  return `<p class="confirm-body swap-body">Paste a backup you exported. You will see a summary before anything is replaced.</p>
+      <textarea id="import-input" class="text-input text-area" placeholder="Paste backup here" spellcheck="false"${track ? ' oninput="dsDraft(this.value)"' : ''}>${esc(state.importDraft || '')}</textarea>
+      <div class="confirm-row">
+        <button class="ghost-btn" onclick="${cancelFn}"><span>CANCEL</span></button>
+        <button class="primary-btn" onclick="applyImport()"><span>IMPORT</span></button>
+      </div>`;
+}
 function renderImportOverlay() {
   return `<div class="overlay" onclick="if(event.target===this) closeImport()">
     <div class="overlay-card">
       <div class="overlay-icon">${icon('upload', 22)}</div>
       <div class="overlay-title">IMPORT BACKUP</div>
-      <p class="confirm-body swap-body">Paste a backup you exported. You will see a summary before anything is replaced.</p>
-      <textarea id="import-input" class="text-input text-area" placeholder="Paste backup here" spellcheck="false">${esc(state.importDraft || '')}</textarea>
-      <div class="confirm-row">
-        <button class="ghost-btn" onclick="closeImport()"><span>CANCEL</span></button>
-        <button class="primary-btn" onclick="applyImport()"><span>IMPORT</span></button>
-      </div>
+      ${importPasteBody('closeImport()', false)}
     </div>
   </div>`;
 }
@@ -3171,12 +3177,12 @@ function renderWorkoutDrawer(animateIn) {
 
 function renderBottomNav() {
   const nav = document.getElementById('bottom-nav');
-  const showNav = ['home', 'history', 'settings', 'advancedSettings', 'progress', 'customMods', 'themeStudio', 'themeAdvanced'].includes(state.screen);
+  const showNav = ['home', 'history', 'settings', 'advancedSettings', 'progress', 'customMods', 'themeStudio', 'themeAdvanced', 'dataSafety'].includes(state.screen);
   nav.style.display = showNav ? 'flex' : 'none';
   nav.innerHTML = `
     <button class="nav-btn ${state.screen === 'home' || state.screen === 'progress' ? 'active' : ''}" onclick="goHome()">${icon('home', 20)}<span>HOME</span></button>
     <button class="nav-btn ${state.screen === 'history' ? 'active' : ''}" onclick="goHistory()">${icon('history', 20)}<span>HISTORY</span></button>
-    <button class="nav-btn ${['settings', 'advancedSettings', 'customMods', 'themeStudio', 'themeAdvanced'].includes(state.screen) ? 'active' : ''}" onclick="goSettings()">${icon('settings', 20)}<span>SETTINGS</span></button>`;
+    <button class="nav-btn ${['settings', 'advancedSettings', 'customMods', 'themeStudio', 'themeAdvanced', 'dataSafety'].includes(state.screen) ? 'active' : ''}" onclick="goSettings()">${icon('settings', 20)}<span>SETTINGS</span></button>`;
 }
 
 // ---------- UI tap feedback ----------
@@ -3617,7 +3623,7 @@ function openImport() {
   if (DS.mode === 'gen') { state.dsOpen = true; state.ds = { view: 'import', stack: [], src: null, dry: null, report: null, confirmDel: null, confirmQ: false }; } // generation mode: the Recovery Center reviews every import first
   render();
 }
-function closeImport() { state.importOpen = false; state.importPreview = null; state.dsOpen = false; state.ds = null; render(); }
+function closeImport() { state.importOpen = false; state.importPreview = null; state.dsOpen = false; state.ds = null; state.dsScreen = false; if (state.screen === 'dataSafety') state.screen = 'settings'; render(); }
 const DS_WARM_TIME = [5, 600], DS_WARM_REPS = [1, 100]; // seconds per TIME exercise, repetitions per REPS exercise
 function dsWarmItemsClean(arr) { // normalised copy of a warm-up exercise list, or null when anything in it is invalid
   if (!Array.isArray(arr)) return null;
@@ -3734,7 +3740,13 @@ function applyImport() { // step 1: validate and show a summary. Nothing is chan
   state.importPreview = plan;
   render();
 }
-function backToImportEdit() { if (state.dsOpen) { dsBack(); return; } state.importPreview = null; render(); }
+function backToImportEdit() {
+  if (state.dsOpen) {
+    if (state.importPreview && !state.importPreview.ds) { state.importPreview = { ds: true }; render(); return; } // a legacy-mode review inside DATA SAFETY: back to the paste step (the marker keeps Android Back stepping back)
+    dsBack(); return;
+  }
+  state.importPreview = null; render();
+}
 function commitImport() { // step 2: the user confirmed the summary
   const p = state.importPreview;
   if (!p) return;
@@ -3751,7 +3763,7 @@ function commitImport() { // step 2: the user confirmed the summary
   render();
   showToast('IMPORTED' + (p.report.records !== null ? ' \u00b7 ' + p.report.records + ' RECORDS' : ''));
 }
-function renderImportPreview() {
+function importPreviewBody(commitFn) { // review step: shared by the old overlay and the DATA SAFETY screen
   const r = state.importPreview.report, lines = [];
   if (r.records !== null) lines.push(r.records + ' workout/rest records' + (r.skipped ? ' (' + r.skipped + ' invalid or duplicate skipped)' : ''));
   if (r.settings) lines.push('Settings');
@@ -3759,19 +3771,22 @@ function renderImportPreview() {
   if (r.added !== null) lines.push(r.added + ' added exercise(s)');
   if (r.theme) lines.push('Accent theme');
   if (r.studio) lines.push(r.studio.ignored ? 'Theme Studio data was invalid and is ignored' : 'Theme Studio: ' + r.studio.customs + ' custom theme(s)' + (r.studio.dropped ? ' (' + r.studio.dropped + ' invalid skipped)' : ''));
+  return `<p class="confirm-body swap-body">This backup contains:</p>
+    <ul class="import-list">${lines.map((l) => `<li>${l}</li>`).join('')}</ul>
+    <p class="p-note">These replace the matching data currently in the app; anything not in the backup is left as it is. Export a backup first if you want to keep what you have now.</p>
+    <div class="confirm-row"><button class="ghost-btn" onclick="backToImportEdit()"><span>BACK</span></button><button class="primary-btn" onclick="${commitFn}"><span>REPLACE MY DATA</span></button></div>`;
+}
+function renderImportPreview() {
   return `<div class="overlay"><div class="overlay-card sheet">
     <div class="overlay-icon">${icon('upload', 22)}</div>
     <div class="overlay-title">REVIEW IMPORT</div>
-    <p class="confirm-body swap-body">This backup contains:</p>
-    <ul class="import-list">${lines.map((l) => `<li>${l}</li>`).join('')}</ul>
-    <p class="p-note">These replace the matching data currently in the app; anything not in the backup is left as it is. Export a backup first if you want to keep what you have now.</p>
-    <div class="confirm-row"><button class="ghost-btn" onclick="backToImportEdit()"><span>BACK</span></button><button class="primary-btn" onclick="commitImport()"><span>REPLACE MY DATA</span></button></div>
+    ${importPreviewBody('commitImport()')}
   </div></div>`;
 }
 
-// ---------- DATA SAFETY screen + Recovery Center (overlay inside Settings; Back is handled by the existing import-overlay rules) ----------
+// ---------- DATA SAFETY screen + Recovery Center (a full-screen screen reached from Settings; Back is handled by the existing import-overlay rules in native-bridge.js) ----------
 function dsLastReport() { try { const raw = Store.rawRead('wa_recovery_last'); return raw === null ? null : JSON.parse(raw); } catch (e) { return null; } }
-function openDataSafety() { state.importOpen = true; state.dsOpen = true; state.ds = { view: 'main', stack: [], src: null, dry: null, report: null, confirmDel: null, confirmQ: false }; state.importPreview = null; render(); }
+function openDataSafety() { state.importOpen = true; state.dsOpen = true; state.dsScreen = true; state.screen = 'dataSafety'; state.ds = { view: 'main', stack: [], src: null, dry: null, report: null, confirmDel: null, confirmQ: false }; state.importPreview = null; render(); }
 function dsNav(view) { state.ds.stack.push(state.ds.view); state.ds.view = view; state.importPreview = { ds: true }; state.ds.confirmDel = null; state.ds.confirmQ = false; render(); }
 function dsBack() {
   if (!state.ds || !state.ds.stack.length) { closeImport(); return; }
@@ -3827,10 +3842,35 @@ const dsIgnoredHtml = (list) => (list || []).map((x) => `<p class="p-note">${esc
 function dsRowsHtml(rows) {
   return '<div class="ds-rows">' + rows.map((r) => `<div class="ds-row"><b>${esc(r.section)}</b><span>${esc(r.before)} \u2192 ${esc(r.after)}</span><i>${r.status === 'SAME' ? 'NO CHANGE' : (r.status === 'KEPT' ? 'KEPT AS IS' : 'WILL CHANGE')}</i></div>`).join('') + '</div>';
 }
-function renderDsMain() {
-  const rawGens = dsListGenerationsRaw(), used = dsUsedChars(), cap = dsCapacity();
-  const scanDown = rawGens === null || used === null || !dsScanAvailable(), gens = rawGens || [], q = dsQuarantineGet().length, last = Store.get('lastExport', null), lr = dsLastReport();
-  let h = `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('settings', 22)}</div><div class="overlay-title">DATA SAFETY</div>`;
+// One frame for every DATA SAFETY view. As a screen it has a Back button and a title; the old overlay frame is kept only for views opened from the Settings overlay path.
+function dsFrame(ic, title, body) {
+  if (state.screen === 'dataSafety') return `<div class="screen settings-screen ds-screen"><button class="back-btn" onclick="dsBack()" aria-label="Back">${icon('chevronLeft', 18)}</button><h2>${title}</h2>${body}</div>`;
+  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon(ic, 22)}</div><div class="overlay-title">${title}</div>${body}</div></div>`;
+}
+function dsImportBlockedMsg(scanDown, gens) { // why IMPORT BACKUP is unavailable ('' when it is available); only the screen uses it, no data logic reads it
+  if (DS.mode === 'degraded') return 'Importing a backup is unavailable while the data pointer is damaged: changes are paused to protect your data, and a backup import cannot be saved in this state. ' + (scanDown ? 'Generation discovery is also temporarily unavailable (see Overview).' : (gens.some((g) => g.ok) ? 'Restore a verified generation above first.' : 'No verified generation was found, so the app stays read-only.')) + ' Your data was not changed.';
+  if (DS.mode === 'gen' && scanDown) return 'Importing a backup is paused until generation discovery works again (see Overview). Your data was not changed.';
+  return '';
+}
+function dsDraft(v) { state.importDraft = v; } // keeps what is typed in the import box if the screen is redrawn
+function dsScreenAfterRender(app) { // new view of the DATA SAFETY screen: start at the top; the import box takes focus like the old overlay did
+  const v = state.ds ? state.ds.view : '';
+  if (v !== lastDsView) { lastDsView = v; app.scrollTop = 0; }
+  if (v === 'import' && !(state.importPreview && !state.importPreview.ds)) { const input = document.getElementById('import-input'); if (input) input.focus(); }
+}
+let lastDsView = '';
+function dsLegacyCommit() { // REPLACE MY DATA inside the DATA SAFETY screen (legacy mode): the unchanged commitImport() writes, then the screen shows its main view again
+  if (DS.mode === 'degraded') return; // read-only state: never reach the legacy write path from this screen
+  if (state.ds) { state.ds.view = 'main'; state.ds.stack = []; }
+  commitImport();
+  if (state.screen === 'dataSafety' && state.ds) { state.importOpen = true; state.importPreview = null; render(); }
+}
+const dsLinkRow = (fn, ic, label, sub, disabled) => `<button class="settings-row link" ${disabled ? 'disabled' : ''} onclick="${fn}">
+      <span class="settings-row-label">${icon(ic, 16)}<span class="row-text">${label}<small>${sub}</small></span></span>
+      <span class="row-chev">${icon('chevronLeft', 16, 'icon-flip')}</span>
+    </button>`;
+function dsOverviewHtml(gens, scanDown, used, cap, last) { // status, storage and notices (unchanged wording)
+  let h = '';
   if (DS.mode === 'gen') h += `<p class="confirm-body swap-body">Your data is in generation ${DS.gen}. Earlier generations are kept as backups and are never deleted automatically.</p>`;
   else if (DS.mode === 'degraded') h += `<p class="confirm-body swap-body">The data pointer is damaged, so changes are paused to protect your data. ${gens.some((g) => g.ok) ? 'A verified generation below can be restored as a new generation; nothing is overwritten or deleted.' : 'No verified generation was found, so the app stays read-only. You can still export what is visible.'}</p>`;
   else h += '<p class="confirm-body swap-body">Safe storage is not active on this device (storage is unavailable or the upgrade has not completed). Your data stays as it was.</p>';
@@ -3840,8 +3880,33 @@ function renderDsMain() {
   DS.notices.forEach((n) => { h += `<p class="p-note">${esc(n.code === 'POINTER_RECOVERED' ? 'The main pointer was damaged; the previous one was used.' : (n.code === 'MIGRATION_FAILED' ? 'The storage upgrade could not finish (' + n.step + '). Your data stays as it was.' : n.code))}</p>`; });
   if (DS.orphans.length) h += `<p class="p-note">Unfinished generation(s) found: ${DS.orphans.join(', ')}. They are not used. You can delete them below.</p>`;
   h += `<p class="p-note">${used === null ? 'Storage estimate unavailable right now (the stored generations cannot be counted).' : 'Storage used: about ' + dsKB(used) + ' of an estimated ' + dsKB(cap) + '.'} Last export: ${last ? esc(String(last).slice(0, 10)) : 'never'}.</p>`;
-  h += '<div class="ds-gens">' + gens.map((g) => `<div class="ds-gen"><div><b>${g.gen === 0 ? 'ORIGINAL DATA' : 'GENERATION ' + g.gen}</b> <i>${DS_ROLE[g.role] || ''}${g.ok ? '' : ' \u00b7 DAMAGED'}</i><br><small>${g.history === null ? 'unreadable' : g.history + ' records'} \u00b7 ${dsKB(g.chars)} \u00b7 ${dsFmtDate(g.ts)}</small></div>
-    <div class="ds-actions">${g.role !== 'CURRENT' && g.role !== 'ORPHAN' && g.ok ? `<button class="pill-btn" onclick="dsRestoreGen(${g.gen})">RESTORE</button>` : ''}${dsCanDelete(g.gen) || (g.role === 'ORPHAN' && DS.mode === 'gen') ? `<button class="pill-btn" onclick="dsDeleteStep(${g.gen})">${state.ds.confirmDel === g.gen ? 'TAP AGAIN TO DELETE' : 'DELETE'}</button>` : ''}</div></div>`).join('') + '</div>';
+  return h;
+}
+function dsGensHtml(gens) { // the generation rows with their existing actions and protection rules (unchanged)
+  return '<div class="ds-gens">' + gens.map((g) => `<div class="ds-gen"><div><b>${g.gen === 0 ? 'ORIGINAL DATA' : 'GENERATION ' + g.gen}</b> <i>${DS_ROLE[g.role] || ''}${g.ok ? '' : ' \u00b7 DAMAGED'}</i><br><small>${g.history === null ? 'unreadable' : g.history + ' records'} \u00b7 ${dsKB(g.chars)} \u00b7 ${dsFmtDate(g.ts)}</small></div>
+    <div class="ds-actions">${g.role !== 'CURRENT' && g.role !== 'ORPHAN' && g.ok ? `<button class="pill-btn" onclick="dsRestoreGen(${g.gen})">RESTORE</button>` : ''}${dsCanDelete(g.gen) || (g.role === 'ORPHAN' && DS.mode === 'gen') ? `<button class="pill-btn danger ${state.ds.confirmDel === g.gen ? 'armed' : ''}" onclick="dsDeleteStep(${g.gen})">${state.ds.confirmDel === g.gen ? 'TAP AGAIN TO DELETE' : 'DELETE'}</button>` : ''}</div></div>`).join('') + '</div>';
+}
+function renderDsMain() {
+  const rawGens = dsListGenerationsRaw(), used = dsUsedChars(), cap = dsCapacity();
+  const scanDown = rawGens === null || used === null || !dsScanAvailable(), gens = rawGens || [], q = dsQuarantineGet().length, last = Store.get('lastExport', null), lr = dsLastReport();
+  if (state.screen === 'dataSafety') {
+    const importWhy = dsImportBlockedMsg(scanDown, gens), importOff = importWhy !== ''; // legacy mode is never blocked (the old Settings import was not either)
+    return dsFrame('settings', 'DATA SAFETY', `<div class="settings-group-title">OVERVIEW</div>
+    <div class="p-card ds-card">${dsOverviewHtml(gens, scanDown, used, cap, last)}</div>
+    <div class="settings-group-title">GENERATIONS</div>
+    ${gens.length ? dsGensHtml(gens) : '<p class="p-note">No generations on this device.</p>'}
+    <div class="settings-group-title">BACKUP &amp; RESTORE</div>
+    <button class="settings-row link" onclick="exportData()"><span class="settings-row-label">${icon('download', 16)}<span class="row-text">EXPORT BACKUP<small>Copy your data to the clipboard</small></span></span></button>
+    <button class="settings-row link" ${importOff ? 'disabled' : ''} onclick="dsNav('import')"><span class="settings-row-label">${icon('upload', 16)}<span class="row-text">IMPORT BACKUP<small>${importOff ? 'Unavailable right now' : 'Review a backup before anything is replaced'}</small></span></span><span class="row-chev">${icon('chevronLeft', 16, 'icon-flip')}</span></button>
+    ${importOff ? `<p class="p-note ds-why">${importWhy}</p>` : ''}
+    <div class="settings-group-title">QUARANTINE</div>
+    ${dsLinkRow("dsNav('quarantine')", 'list', `QUARANTINE (${q})`, 'Records that could not be placed in your History', false)}
+    <div class="settings-group-title">RECOVERY REPORT</div>
+    ${dsLinkRow('dsViewLastReport()', 'history', 'LAST REPORT', lr ? 'Outcome of the last restore or import' : 'No report yet', !lr)}`);
+  }
+  let h = `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('settings', 22)}</div><div class="overlay-title">DATA SAFETY</div>`;
+  h += dsOverviewHtml(gens, scanDown, used, cap, last);
+  h += dsGensHtml(gens);
   h += `<div class="confirm-row"><button class="ghost-btn" onclick="exportData()"><span>EXPORT BACKUP</span></button><button class="ghost-btn" ${scanDown ? 'disabled' : ''} onclick="dsNav('import')"><span>IMPORT BACKUP</span></button></div>`;
   h += `<div class="confirm-row"><button class="ghost-btn" onclick="dsNav('quarantine')"><span>QUARANTINE (${q})</span></button><button class="ghost-btn" ${lr ? '' : 'disabled'} onclick="dsViewLastReport()"><span>LAST REPORT</span></button></div>`;
   h += '<div class="confirm-row"><button class="primary-btn" onclick="closeImport()"><span>CLOSE</span></button></div></div></div>';
@@ -3849,11 +3914,12 @@ function renderDsMain() {
 }
 function renderDsSummary() {
   const d = state.ds.dry, isImport = state.ds.src.kind === 'backup';
-  let h = `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon(isImport ? 'upload' : 'download', 22)}</div><div class="overlay-title">${isImport ? 'REVIEW IMPORT' : 'REVIEW RESTORE'}</div>`;
+  const ttl = isImport ? 'REVIEW IMPORT' : 'REVIEW RESTORE', ic = isImport ? 'upload' : 'download';
+  let h = '';
   if (!d.ok) {
     h += `<p class="confirm-body swap-body">${esc(dsMsg(d.errors[0]))}</p>${d.space && !d.space.ok && !d.space.unavailable ? `<p class="p-note">Needed about ${dsKB(d.space.needed)} more; about ${dsKB(Math.max(0, d.space.capacity - d.space.used))} free (estimate).</p>` : ''}`;
-    h += '<div class="confirm-row"><button class="primary-btn" onclick="dsBack()"><span>BACK</span></button></div></div></div>';
-    return h;
+    h += '<div class="confirm-row"><button class="primary-btn" onclick="dsBack()"><span>BACK</span></button></div>';
+    return dsFrame(ic, ttl, h);
   }
   h += `<p class="confirm-body swap-body">This was checked without changing anything. Source: ${esc(d.label)}.</p>${dsRowsHtml(d.rows)}`;
   const c = d.counts;
@@ -3865,33 +3931,35 @@ function renderDsSummary() {
   if (d.blocked) h += `<p class="p-note">${esc(dsMsg(d.blocked))}</p>`;
   h += `<p class="p-note">Your current data is kept as generation ${DS.gen}, a backup you can restore.</p>`;
   h += `<div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="ghost-btn" onclick="dsCopyDetails()"><span>COPY DETAILS</span></button></div>`;
-  h += `<div class="confirm-row"><button class="primary-btn" ${d.blocked ? 'disabled' : ''} onclick="dsConfirmStep()"><span>CONTINUE</span></button></div></div></div>`;
-  return h;
+  h += `<div class="confirm-row"><button class="primary-btn" ${d.blocked ? 'disabled' : ''} onclick="dsConfirmStep()"><span>CONTINUE</span></button></div>`;
+  return dsFrame(ic, ttl, h);
 }
 function renderDsConfirm() {
   const d = state.ds.dry, isImport = state.ds.src.kind === 'backup';
-  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon(isImport ? 'upload' : 'download', 22)}</div><div class="overlay-title">${isImport ? 'IMPORT NOW?' : 'RESTORE NOW?'}</div>
-    <p class="confirm-body swap-body">This creates generation ${dsNextGen() === null ? '(number unavailable right now)' : dsNextGen()} with the result you reviewed. ${d.counts.quarantine} record(s) go to Quarantine. If anything fails before the switch, nothing changes.</p>
-    <div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="primary-btn" onclick="dsExecute()"><span>${isImport ? 'IMPORT' : 'RESTORE'}</span></button></div></div></div>`;
+  return dsFrame(isImport ? 'upload' : 'download', isImport ? 'IMPORT NOW?' : 'RESTORE NOW?', `<p class="confirm-body swap-body">This creates generation ${dsNextGen() === null ? '(number unavailable right now)' : dsNextGen()} with the result you reviewed. ${d.counts.quarantine} record(s) go to Quarantine. If anything fails before the switch, nothing changes.</p>
+    <div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="primary-btn" onclick="dsExecute()"><span>${isImport ? 'IMPORT' : 'RESTORE'}</span></button></div>`);
 }
 function renderDsReport() {
   const r = state.ds.report;
   const msg = r.outcome === 'COMMITTED' ? 'Completed. Everything was verified.' : (r.outcome === 'FAILED' ? 'Failed at step ' + r.reason + '. Your data was not changed.' : dsMsg(r.reason));
-  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('list', 22)}</div><div class="overlay-title">RECOVERY REPORT</div>
-    <p class="confirm-body swap-body"><b>${esc(r.outcome)}</b> \u00b7 ${esc(r.type)} \u00b7 ${esc(r.source)}</p><p class="p-note">${esc(msg)}</p>${dsRowsHtml(r.rows || [])}
+  return dsFrame('list', 'RECOVERY REPORT', `<p class="confirm-body swap-body"><b>${esc(r.outcome)}</b> \u00b7 ${esc(r.type)} \u00b7 ${esc(r.source)}</p><p class="p-note">${esc(msg)}</p>${dsRowsHtml(r.rows || [])}
     ${dsIgnoredHtml(r.ignored)}
     ${r.counts ? `<p class="p-note">${r.counts.stay} stay \u00b7 ${r.counts.identical} identical ignored \u00b7 ${r.counts.quarantine} to Quarantine</p>` : ''}
     ${(r.integrity || []).length ? `<p class="p-note">Checks: ${r.integrity.every((x) => x.ok) ? 'all passed' : 'some failed'}</p>` : ''}
     <p class="p-note">Generation ${r.genBefore} \u2192 ${r.genAfter}. ${r.saved ? 'Report saved.' : 'The report could not be saved: copy it now.'}</p>
-    <div class="confirm-row"><button class="ghost-btn" onclick="dsCopyReport()"><span>COPY REPORT</span></button><button class="primary-btn" onclick="closeImport()"><span>DONE</span></button></div></div></div>`;
+    <div class="confirm-row"><button class="ghost-btn" onclick="dsCopyReport()"><span>COPY REPORT</span></button><button class="primary-btn" onclick="closeImport()"><span>DONE</span></button></div>`);
 }
 function renderDsQuarantine() {
   const items = dsQuarantineGet();
-  return `<div class="overlay"><div class="overlay-card sheet"><div class="overlay-icon">${icon('list', 22)}</div><div class="overlay-title">QUARANTINE</div>
-    <p class="confirm-body swap-body">${items.length} item(s). These records could not be placed in your History. They are kept until you delete them.</p>
+  return dsFrame('list', 'QUARANTINE', `<p class="confirm-body swap-body">${items.length} item(s). These records could not be placed in your History. They are kept until you delete them.</p>
     ${items.slice(0, 20).map((q) => `<p class="p-note">${esc(q.reason)} \u00b7 ${esc(dsIsObj(q.record) ? String(q.record.date) + ' \u00b7 ' + historySessionName(q.record) : 'unreadable record')}</p>`).join('')}${items.length > 20 ? `<p class="p-note">\u2026 and ${items.length - 20} more (use COPY ALL).</p>` : ''}
     <div class="confirm-row"><button class="ghost-btn" onclick="dsBack()"><span>BACK</span></button><button class="ghost-btn" ${items.length ? '' : 'disabled'} onclick="dsCopyQuarantine()"><span>COPY ALL</span></button></div>
-    <div class="confirm-row"><button class="ghost-btn" ${items.length ? '' : 'disabled'} onclick="dsQuarantineStep()"><span>${state.ds.confirmQ ? 'TAP AGAIN TO DELETE ALL' : 'DELETE ALL'}</span></button></div></div></div>`;
+    <div class="confirm-row"><button class="ghost-btn" ${items.length ? '' : 'disabled'} onclick="dsQuarantineStep()"><span>${state.ds.confirmQ ? 'TAP AGAIN TO DELETE ALL' : 'DELETE ALL'}</span></button></div>`);
+}
+function renderDsImport() { // the import step inside the DATA SAFETY screen (generation mode reviews through the Recovery Center; legacy mode uses the original review and commitImport)
+  if (DS.mode === 'degraded') return dsFrame('upload', 'IMPORT BACKUP', `<p class="confirm-body swap-body">${(() => { const raw = dsListGenerationsRaw(); return dsImportBlockedMsg(raw === null || dsUsedChars() === null || !dsScanAvailable(), raw || []); })()}</p><div class="confirm-row"><button class="primary-btn" onclick="dsBack()"><span>BACK</span></button></div>`);
+  if (state.importPreview && !state.importPreview.ds) return dsFrame('upload', 'REVIEW IMPORT', importPreviewBody('dsLegacyCommit()'));
+  return dsFrame('upload', 'IMPORT BACKUP', importPasteBody('dsBack()', true));
 }
 function renderDataSafety() {
   const v = state.ds.view;
@@ -3899,7 +3967,7 @@ function renderDataSafety() {
   if (v === 'confirm') return renderDsConfirm();
   if (v === 'report') return renderDsReport();
   if (v === 'quarantine') return renderDsQuarantine();
-  if (v === 'import') return renderImportOverlay();
+  if (v === 'import') return state.screen === 'dataSafety' ? renderDsImport() : renderImportOverlay();
   return renderDsMain();
 }
 function renderSaveFailed() {

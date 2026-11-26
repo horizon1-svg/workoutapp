@@ -412,8 +412,9 @@ ok('EXERCISE_DB is still untouched after all hub/preset operations', J(run(um, '
 ok('history entries are unchanged by presets, session saves and resets', hm.store.wa_history === histSnap && dm.store.wa_history === dHist);
 // UI consistency (the redesigned components share one language)
 const settingsHtml = run(make(NOW), 'renderSettings()');
-ok('Settings: new entries use the same row card as the toggles (no stray ghost/action-card buttons), grouped under titles', (settingsHtml.match(/class="settings-row"/g) || []).length === 3 && (settingsHtml.match(/class="settings-row link"/g) || []).length === 6 && settingsHtml.includes('DATA SAFETY') && !settingsHtml.includes('ghost-btn') && !settingsHtml.includes('action-card') && ['PREFERENCES', 'APPEARANCE', 'WORKOUT', 'DATA'].every((g) => settingsHtml.includes('settings-group-title">' + g)) && settingsHtml.includes('CUSTOMIZATION') && balanced(settingsHtml));
-ok('Settings: every link row triggers its action', ['goThemeStudio()', 'goAdvancedSettings()', 'goCustomMods()', 'exportData()', 'openImport()'].every((f) => settingsHtml.includes('onclick="' + f + '"')));
+ok('Settings: new entries use the same row card as the toggles (no stray ghost/action-card buttons), grouped under titles', (settingsHtml.match(/class="settings-row"/g) || []).length === 3 && (settingsHtml.match(/class="settings-row link"/g) || []).length === 4 && settingsHtml.includes('DATA SAFETY') && !settingsHtml.includes('ghost-btn') && !settingsHtml.includes('action-card') && ['PREFERENCES', 'APPEARANCE', 'WORKOUT', 'DATA'].every((g) => settingsHtml.includes('settings-group-title">' + g)) && settingsHtml.includes('CUSTOMIZATION') && balanced(settingsHtml));
+ok('Settings: every link row triggers its action', ['goThemeStudio()', 'goAdvancedSettings()', 'goCustomMods()', 'openDataSafety()'].every((f) => settingsHtml.includes('onclick="' + f + '"')));
+ok('Settings (phase 3.1A): no duplicate EXPORT/IMPORT BACKUP rows any more; backup lives only inside DATA SAFETY', !settingsHtml.includes('exportData()') && !settingsHtml.includes('openImport()') && !settingsHtml.includes('EXPORT BACKUP') && !settingsHtml.includes('IMPORT BACKUP'));
 let ui = make(NOW); run(ui, "selectSession('PUSH_A');openEdit(0)"); ui.setField('edit-name', 'Push-ups'); run(ui, "editStep('sets',-1);saveEditCustom();openAdd()"); ui.setField('edit-name', 'Pike Push-ups'); run(ui, 'saveEditCustom();changeSets(2,1)');
 const setupUi = run(ui, 'renderSetup()');
 ok('Setup rows: status flags sit inline on the target line (no separate hanging block)', /<div class="exercise-target"><span>15 REPS<\/span><span class="flag flag-saved">CUSTOM<\/span><\/div>/.test(setupUi) && /<span class="flag flag-temp">THIS WORKOUT ONLY<\/span><\/div>/.test(setupUi) && /<span class="flag flag-added">ADDED<\/span><\/div>/.test(setupUi) && !setupUi.includes('exercise-flags'));
@@ -1026,7 +1027,7 @@ if (!GEN_VIEW) {
   // settings screen
   const sh = run(G(clone(L0)), 'renderSettings()');
   ok('Settings has a DATA SAFETY row in the DATA group', sh.indexOf('DATA SAFETY') > sh.indexOf('settings-group-title">DATA') && sh.includes('openDataSafety()'));
-  ok('every Phase 2 settings function is still present (toggles, Theme Studio, Advanced, Customization, export, import)', ['toggleSetting', 'goThemeStudio', 'goAdvancedSettings', 'goCustomMods', 'exportData', 'openImport'].every((f) => sh.includes(f + '(')));
+  ok('every Phase 2 settings function is still present (toggles, Theme Studio, Advanced, Customization, Data Safety entry); export/import now live in DATA SAFETY but their functions still exist', ['toggleSetting', 'goThemeStudio', 'goAdvancedSettings', 'goCustomMods', 'openDataSafety'].every((f) => sh.includes(f + '(')) && run(G(clone(L0)), "typeof exportData === 'function' && typeof openImport === 'function'") === true);
   // routine settings/theme writes in generation mode
   const cT = G(clone(L0)); run(cT, "toggleSetting('keepAwake')"); const cT2 = G(clone(cT.store));
   ok('a setting changed in generation mode is stored in the generation and survives a restart; the original keys stay untouched', run(cT2, "Store.get('settings').keepAwake") === true && readGen(cT2, 1).config.settings.keepAwake === true && legacyBytes(cT2.store) === legacyBytes(L0));
@@ -1427,7 +1428,7 @@ if (!GEN_VIEW) {
     ok(label + ': creating a generation directly (the import button path and dsCommit) is refused as SCAN_UNAVAILABLE', direct.ok === false && direct.step === 'SCAN_UNAVAILABLE');
     ok(label + ': deleting a generation is refused', run(cF, 'dsCanDelete(1)') === false && run(cF, 'dsCanDelete(300)') === false && run(cF, 'dsDeleteGeneration(1)') === false);
     const scr = run(cF, "(state.screen='settings',openDataSafety(),renderDataSafety())");
-    ok(label + ': Data Safety explains that discovery is temporarily unavailable and that generation operations are paused; no restore/delete buttons; import disabled', scr.includes('TEMPORARILY UNAVAILABLE') && scr.includes('paused') && scr.includes('Your data was not changed') && !scr.includes('dsRestoreGen(') && !scr.includes('dsDeleteStep(') && /<button class="ghost-btn" disabled onclick="dsNav\('import'\)"/.test(scr) && balanced(scr));
+    ok(label + ': Data Safety explains that discovery is temporarily unavailable and that generation operations are paused; no restore/delete buttons; import disabled', scr.includes('TEMPORARILY UNAVAILABLE') && scr.includes('paused') && scr.includes('Your data was not changed') && !scr.includes('dsRestoreGen(') && !scr.includes('dsDeleteStep(') && /<button class="settings-row link" disabled onclick="dsNav\('import'\)"/.test(scr) && balanced(scr));
     ok(label + ': after all these attempts EVERY key and value in the storage is exactly as before', J(cF.store) === startJ);
     // routine saves do not depend on discovery, and the screen says so
     const cR = G(clone(gapsB)); fail(cR);
@@ -1540,6 +1541,136 @@ if (!GEN_VIEW) {
     healKeys(c);
   }
   ok('start-up migration with listing failing after k listings (k = 0..6): either a complete, verified migration or nothing written at all (version stays 5)', migBadU.length === 0 && migSafe >= 2 && migDone >= 1, J({ migBadU, migSafe, migDone }));
+}
+
+// ================================================================== 10. DATA SAFETY UI POLISH (phase 3.1A): full screen, no duplicate backup rows, storage untouched
+console.log('\n== 10. DATA SAFETY SCREEN (phase 3.1A): full-screen navigation, legacy-mode import, storage integrity ==');
+if (!GEN_VIEW) {
+  const G10 = (store, o) => make(NOW, store, Object.assign({ dataSafety: true }, o || {}));
+  const L10 = () => ({ wa_history: J([W('2026-10-12'), R('2026-10-11'), W('2026-10-10', { type: 'PULL_A' })]), wa_settings: J({ keepAwake: false }), wa_accentTheme: J('blue'), wa_schemaVersion: '5' });
+  const strip = (txt) => { const o = JSON.parse(txt); delete o.exportedAt; return J(o); }; // the only generated metadata in a backup is its timestamp
+  const SECTIONS = ['OVERVIEW', 'GENERATIONS', 'BACKUP &amp; RESTORE', 'QUARANTINE', 'RECOVERY REPORT'];
+  const modalEmpty = (c) => (c.roots['modal-root'] ? c.roots['modal-root']._h : '') === '';
+
+  // ---- the screen itself ----
+  let c = G10(L10()); run(c, 'goSettings();openDataSafety()');
+  let scr = run(c, 'renderDataSafety()');
+  ok('DATA SAFETY opens as its own screen (not an overlay) and keeps the import/back flags the Android Back handler relies on', run(c, 'state.screen') === 'dataSafety' && run(c, 'state.importOpen && state.dsOpen && state.dsScreen') === true && c.roots.app._h.includes('ds-screen') && modalEmpty(c));
+  ok('screen: title, Back button and the five sections in order (Overview, Generations, Backup & Restore, Quarantine, Recovery Report)', scr.includes('<h2>DATA SAFETY</h2>') && scr.includes('class="back-btn" onclick="dsBack()"') && SECTIONS.every((t) => scr.includes('settings-group-title">' + t)) && SECTIONS.map((t) => scr.indexOf('settings-group-title">' + t)).every((v, i, a) => i === 0 || v > a[i - 1]) && balanced(scr));
+  ok('screen: Backup & Restore holds EXPORT and IMPORT, Quarantine and Last Report are reachable, no leftover CLOSE button or duplicate rows', scr.includes('onclick="exportData()"') && scr.includes('onclick="dsNav(\'import\')"') && scr.includes('onclick="dsNav(\'quarantine\')"') && scr.includes('onclick="dsViewLastReport()"') && !scr.includes('onclick="closeImport()"') && (scr.match(/onclick="exportData\(\)"/g) || []).length === 1 && (scr.match(/dsNav\('import'\)/g) || []).length === 1);
+  ok('screen: generation rows keep their existing actions (ORIGINAL DATA can be restored; the active generation cannot be deleted)', scr.includes('ORIGINAL DATA') && scr.includes('onclick="dsRestoreGen(0)"') && !scr.includes('dsDeleteStep(1)') && scr.includes('GENERATION 1'));
+  ok('bottom navigation stays visible with SETTINGS highlighted while the screen is open', c.roots['bottom-nav'].style.display === 'flex' && /nav-btn active" onclick="goSettings\(\)"/.test(c.roots['bottom-nav']._h));
+  // Back from every view
+  const views = { quarantine: "dsNav('quarantine')", import: "dsNav('import')", summary: 'dsRestoreGen(0)' };
+  for (const [name, call] of Object.entries(views)) {
+    c = G10(L10()); run(c, 'goSettings();openDataSafety();' + call); const opened = run(c, 'state.ds.view') === name;
+    run(c, 'dsBack()'); ok('Back from ' + name + ' returns to the DATA SAFETY main view (screen stays open)', opened && run(c, 'state.ds.view') === 'main' && run(c, 'state.screen') === 'dataSafety' && run(c, 'state.importOpen') === true);
+    run(c, 'dsBack()'); ok('Back from the main view returns to Settings and clears every DATA SAFETY flag (after ' + name + ')', run(c, 'state.screen') === 'settings' && run(c, 'state.importOpen || state.dsOpen || state.dsScreen') === false && run(c, 'state.ds') === null && run(c, 'state.importPreview') === null);
+  }
+  c = G10(L10()); run(c, 'goSettings();openDataSafety();dsRestoreGen(0);dsConfirmStep()'); const confirmOpen = run(c, 'state.ds.view') === 'confirm';
+  run(c, 'dsBack()'); const backToSummary = run(c, 'state.ds.view') === 'summary'; run(c, 'dsBack()');
+  ok('Back steps confirm -> review -> main one at a time', confirmOpen && backToSummary && run(c, 'state.ds.view') === 'main');
+  // leaving by the bottom bar must not leave anything open behind the next screen
+  c = G10(L10()); run(c, 'goSettings();openDataSafety();dsNav(\'quarantine\');goHistory()');
+  ok('leaving through the bottom bar (History) clears DATA SAFETY completely', run(c, 'state.screen') === 'history' && run(c, 'state.importOpen || state.dsOpen || state.dsScreen') === false && run(c, 'state.ds') === null && modalEmpty(c));
+  run(c, 'goSettings()'); ok('returning to Settings afterwards shows plain Settings (no overlay resurrected)', run(c, 'state.screen') === 'settings' && modalEmpty(c) && c.roots.app._h.includes('<h2>SETTINGS</h2>'));
+  c = G10(L10()); run(c, 'goSettings();openDataSafety();goSettings()');
+  ok('tapping SETTINGS in the bottom bar from the screen returns to Settings', run(c, 'state.screen') === 'settings' && run(c, 'state.ds') === null && modalEmpty(c));
+  c = G10(L10()); run(c, 'goSettings();openDataSafety();dsNav(\'quarantine\');closeImport()');
+  ok('closeImport() (Escape key / report DONE) from any view returns to Settings', run(c, 'state.screen') === 'settings' && run(c, 'state.ds') === null);
+
+  // ---- storage and workout integrity: opening, navigating and leaving changes nothing ----
+  c = G10(L10()); const snap0 = J(c.store);
+  run(c, "goSettings();openDataSafety();dsNav('quarantine');dsBack();dsNav('import');dsBack();dsRestoreGen(0);dsBack();dsViewLastReport();closeImport();openDataSafety();closeImport();goHistory();goSettings()");
+  ok('opening, navigating through every section (incl. a restore review) and leaving changes no stored key or value', J(c.store) === snap0);
+  c = G10(L10()); run(c, "selectSession('PUSH_A');startWorkoutFlow();beginWarmupStep()"); run(c, 'state.confirmAction=null;goHome()');
+  const wo = () => J({ k: run(c, 'state.sessionKey'), ex: run(c, 'state.exerciseList'), wu: run(c, 'state.warmupList'), idx: run(c, 'state.curExerciseIdx'), set: run(c, 'state.curSet'), res: run(c, 'state.results'), act: run(c, "Store.get('activeSession', null)") });
+  const store1 = J(c.store), wo1 = wo(); ok('(setup) a workout is in progress and saved while the user is on Home', run(c, "!!Store.get('activeSession', null)") === true && run(c, 'renderHome()').includes('RESUME'));
+  run(c, "goSettings();openDataSafety();dsNav('quarantine');dsBack();dsNav('import');dsBack();dsRestoreGen(0);dsBack();dsBack();goSettings();openDataSafety();goHistory();goSettings();openDataSafety();closeImport();goHome()");
+  ok('opening and leaving DATA SAFETY with a workout in progress leaves the workout state and every stored key unchanged', wo() === wo1 && J(c.store) === store1 && run(c, 'renderHome()').includes('RESUME'));
+  ok('with a workout in progress the review is blocked (WORKOUT_RUNNING), CONTINUE is disabled and cannot advance (existing protection untouched, nothing written)', (() => { run(c, 'goSettings();openDataSafety();dsRestoreGen(0)'); const d = run(c, 'state.ds.dry'), html = run(c, 'renderDataSafety()'); run(c, 'dsConfirmStep()'); const stayed = run(c, 'state.ds.view') === 'summary'; run(c, 'closeImport();goHome()'); return d.blocked === 'WORKOUT_RUNNING' && /primary-btn" disabled onclick="dsConfirmStep\(\)"/.test(html) && stayed; })() && J(c.store) === store1);
+
+  // ---- export format is unchanged; it is reachable from the screen ----
+  c = G10(L10()); const bkBefore = strip(run(c, 'buildBackup()'));
+  run(c, "goSettings();openDataSafety();dsNav('quarantine');dsBack();closeImport()");
+  ok('backup output is identical before and after navigating DATA SAFETY (ignoring its timestamp)', strip(run(c, 'buildBackup()')) === bkBefore);
+  run(c, 'goSettings();openDataSafety();exportData()');
+  const exported = c.copied[c.copied.length - 1], expo = JSON.parse(exported);
+  ok('EXPORT BACKUP from the screen copies the same backup format (app, schemaVersion 6, data incl. plan) and records the export date only', expo.app === 'WorkoutApp' && expo.schemaVersion === 6 && !!expo.data.plan && strip(exported) === bkBefore && typeof run(c, "Store.get('lastExport', null)") === 'string' && c.toasts.length >= 0);
+  const snapAfterExport = J(c.store); run(c, "dsNav('quarantine');dsBack();closeImport()"); ok('after exporting, navigating still changes nothing', J(c.store) === snapAfterExport);
+
+  // ---- generation-mode import through the screen = Recovery Center review, then ONE new generation ----
+  const other = G10({ wa_history: J([W('2026-09-01'), W('2026-09-02')]), wa_schemaVersion: '5' }), otherBk = run(other, 'buildBackup()');
+  c = G10(L10()); run(c, 'goSettings();openDataSafety();dsNav(\'import\')'); c.setField('import-input', otherBk); const impBefore = J(c.store);
+  scr = run(c, 'renderDataSafety()');
+  ok('import step (generation mode): paste box with CANCEL that steps back, typed text kept if the screen redraws', scr.includes('id="import-input"') && scr.includes('onclick="dsBack()"') && scr.includes('oninput="dsDraft(this.value)"') && balanced(scr));
+  run(c, 'applyImport()');
+  ok('importing shows the Recovery Center review first and writes nothing', run(c, 'state.ds.view') === 'summary' && run(c, 'renderDataSafety()').includes('REVIEW IMPORT') && J(c.store) === impBefore && run(c, 'state.screen') === 'dataSafety');
+  run(c, 'dsConfirmStep();dsExecute()');
+  ok('after confirming, the import is one new generation, the report is shown on the screen, and DONE returns to Settings', run(c, 'DS.gen') === 2 && run(c, 'state.ds.view') === 'report' && run(c, 'renderDataSafety()').includes('RECOVERY REPORT') && run(c, 'closeImport(), state.screen') === 'settings');
+
+  // ---- LEGACY MODE import (the old Settings entry used to be the only working path) ----
+  const Lg = (store) => make(NOW, store), legacyDB = () => ({ wa_history: J([W('2026-10-01')]), wa_schemaVersion: '5' });
+  const srcCtx = Lg({ wa_history: J([W('2026-09-05'), W('2026-09-04')]), wa_settings: J({ keepAwake: false }), wa_schemaVersion: '5' }), legacyBk = run(srcCtx, 'buildBackup()');
+  c = Lg(legacyDB());
+  ok('(setup) this context really is in legacy mode', run(c, 'DS.mode') === 'legacy');
+  run(c, 'goSettings();openDataSafety()'); scr = run(c, 'renderDataSafety()');
+  ok('legacy mode: the DATA SAFETY screen offers IMPORT BACKUP, enabled', scr.includes('dsNav(\'import\')') && !/settings-row link" disabled onclick="dsNav\('import'\)"/.test(scr) && balanced(scr));
+  run(c, "dsNav('import')"); c.setField('import-input', legacyBk); const lgBefore = J(c.store);
+  ok('legacy mode: the import step shows the paste box inside the screen', run(c, 'renderDataSafety()').includes('id="import-input"') && run(c, 'state.screen') === 'dataSafety');
+  run(c, 'applyImport()'); const prev = run(c, 'renderDataSafety()');
+  ok('legacy mode: applyImport shows the ORIGINAL review (what the backup contains) inside the screen, nothing written yet', prev.includes('REVIEW IMPORT') && prev.includes('2 workout/rest records') && prev.includes('onclick="dsLegacyCommit()"') && prev.includes('REPLACE MY DATA') && J(c.store) === lgBefore && balanced(prev));
+  run(c, 'backToImportEdit()');
+  ok('legacy mode: BACK on the review returns to the paste step with the text kept, nothing written', run(c, 'renderDataSafety()').includes('id="import-input"') && run(c, 'renderDataSafety()').includes('<h2>IMPORT BACKUP</h2>') && run(c, 'state.importDraft') === legacyBk && J(c.store) === lgBefore && run(c, 'state.importPreview.ds') === true);
+  run(c, 'backToImportEdit()'); ok('legacy mode: BACK on the paste step returns to the DATA SAFETY main view (Android Back keeps stepping back)', run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true && run(c, 'state.screen') === 'dataSafety');
+  run(c, "dsNav('import')"); c.setField('import-input', legacyBk); run(c, 'applyImport();dsLegacyCommit()');
+  const viaScreen = J(c.store);
+  ok('legacy mode: REPLACE MY DATA imports and returns to the DATA SAFETY main view with a toast', run(c, "Store.get('history').map(h=>h.date).join()") === '2026-09-05,2026-09-04' && run(c, 'state.screen') === 'dataSafety' && run(c, 'state.ds.view') === 'main' && run(c, 'state.importOpen') === true && run(c, 'state.importPreview') === null && c.toasts.some((t) => /IMPORTED/.test(t)));
+  const old = Lg(legacyDB()); run(old, 'goSettings();openImport()'); old.setField('import-input', legacyBk); run(old, 'applyImport();commitImport()');
+  ok('legacy mode: the result in storage is byte-identical to what the OLD Settings import path produces (same plan, same writes)', viaScreen === J(old.store));
+  run(c, 'closeImport()'); ok('legacy mode: leaving afterwards goes to Settings', run(c, 'state.screen') === 'settings' && run(c, 'state.ds') === null);
+  const bad = Lg(legacyDB()); run(bad, 'goSettings();openDataSafety();dsNav(\'import\')'); bad.setField('import-input', 'not a backup'); const badBefore = J(bad.store); run(bad, 'applyImport()');
+  ok('legacy mode: an invalid backup is rejected with the same toast and nothing changes', run(bad, 'state.importPreview.ds') === true && J(bad.store) === badBefore && bad.toasts.length > 0);
+
+  // ---- DEGRADED mode (both data pointers unreadable): a backup import cannot be saved there, so it is blocked, explained, and cannot write ----
+  const dgCtx = () => { const b = G10(L10()); b.store.wa_ptr = '{broken'; b.store.wa_ptr_bak = '{broken'; return G10(JSON.parse(J(b.store))); };
+  let dg = dgCtx(); run(dg, 'goSettings();openDataSafety()'); const dgScr = run(dg, 'renderDataSafety()'), dgSnap = J(dg.store);
+  ok('(setup) the fixture really is degraded (unreadable pointers, generations still on disk)', run(dg, 'DS.mode') === 'degraded' && run(dg, "DS.notices.some((n) => n.code === 'POINTER_UNREADABLE')") === true && Object.keys(dg.store).some((k) => /^wa_g\d+_/.test(k)));
+  ok('degraded: IMPORT BACKUP is disabled and the screen says why (pointer damaged, import cannot be saved, restore a verified generation first, data not changed)', /settings-row link" disabled onclick="dsNav\('import'\)"/.test(dgScr) && dgScr.includes('class="p-note ds-why"') && dgScr.includes('Importing a backup is unavailable while the data pointer is damaged') && dgScr.includes('cannot be saved in this state') && dgScr.includes('Restore a verified generation above first') && dgScr.includes('Your data was not changed') && dgScr.includes('Unavailable right now') && balanced(dgScr));
+  ok('degraded: the safe actions stay available (EXPORT, restore of a verified generation, Quarantine, Last Report)', dgScr.includes('onclick="exportData()"') && dgScr.includes('onclick="dsRestoreGen(') && dgScr.includes('onclick="dsNav(\'quarantine\')"') && dgScr.includes('onclick="dsViewLastReport()"'));
+  // bypass attempts: even if the import step is reached some other way, nothing can be written
+  run(dg, "dsNav('import')"); const dgImp = run(dg, 'renderDataSafety()');
+  ok('degraded: reaching the import step by code shows the explanation with BACK only: no paste box, no commit button', dgImp.includes('Importing a backup is unavailable') && !dgImp.includes('import-input') && !dgImp.includes('dsLegacyCommit') && !dgImp.includes('commitImport') && dgImp.includes('onclick="dsBack()"') && balanced(dgImp));
+  const bkOther = run(G10({ wa_history: J([W('2026-09-01')]), wa_schemaVersion: '5' }), 'buildBackup()');
+  dg.setField('import-input', bkOther); run(dg, 'applyImport()'); const dgPrev = run(dg, 'renderDataSafety()');
+  ok('degraded: even with a valid backup pasted programmatically, the screen never offers REPLACE MY DATA', !dgPrev.includes('REPLACE MY DATA') && !dgPrev.includes('dsLegacyCommit') && dgPrev.includes('Importing a backup is unavailable'));
+  const toastsBefore = dg.toasts.length; run(dg, 'dsLegacyCommit()');
+  ok('degraded: calling the screen commit helper directly writes nothing (every stored key identical) and shows no IMPORTED toast', J(dg.store) === dgSnap && dg.toasts.length === toastsBefore && !dg.toasts.some((t) => /IMPORTED/.test(t)) && run(dg, "Store.get('history', []).length") === 3);
+  run(dg, 'dsBack();dsBack()'); ok('degraded: Back from the blocked import step returns to the main view, then to Settings; storage unchanged', run(dg, 'state.screen') === 'settings' && run(dg, 'state.ds') === null && J(dg.store) === dgSnap);
+  // degraded and the generation list cannot be read: still blocked, and the text names the real cause
+  const dg2 = dgCtx(); dg2.__listFail = 'length'; run(dg2, 'goSettings();openDataSafety()'); const dg2Scr = run(dg2, 'renderDataSafety()');
+  ok('degraded + generation discovery unavailable: IMPORT stays disabled and the reason mentions discovery (not "no verified generation")', /settings-row link" disabled onclick="dsNav\('import'\)"/.test(dg2Scr) && dg2Scr.includes('Generation discovery is also temporarily unavailable') && !dg2Scr.includes('No verified generation was found, so the app stays read-only. Your data') && balanced(dg2Scr));
+  // generation mode with discovery down: disabled as before, now with a visible reason; healthy generation mode and legacy mode: enabled, no note
+  const gd = G10(L10()); gd.__listFail = 'length'; run(gd, 'goSettings();openDataSafety()'); const gdScr = run(gd, 'renderDataSafety()');
+  ok('generation mode + discovery unavailable: IMPORT disabled (as before) and the reason is shown', /settings-row link" disabled onclick="dsNav\('import'\)"/.test(gdScr) && gdScr.includes('Importing a backup is paused until generation discovery works again') && !gdScr.includes('data pointer is damaged, '));
+  const okc = G10(L10()); run(okc, 'goSettings();openDataSafety()'); const okScr = run(okc, 'renderDataSafety()');
+  ok('healthy generation mode: IMPORT enabled and no explanation note', /settings-row link"\s+onclick="dsNav\('import'\)"/.test(okScr) && !okScr.includes('ds-why'));
+  const lgc = make(NOW, { wa_history: J([W('2026-10-01')]), wa_schemaVersion: '5' }); run(lgc, 'goSettings();openDataSafety()'); const lgScr = run(lgc, 'renderDataSafety()');
+  ok('legacy mode: IMPORT enabled and no explanation note (parity with the removed Settings entry)', run(lgc, 'DS.mode') === 'legacy' && /settings-row link"\s+onclick="dsNav\('import'\)"/.test(lgScr) && !lgScr.includes('ds-why'));
+
+  // ---- confirmation flows and destructive actions keep their behaviour ----
+  c = G10(L10()); run(c, "goSettings();openDataSafety();dsRestoreGen(0);dsConfirmStep();dsExecute();state.ds.view='main';state.ds.stack=[];dsRestoreGen(0);dsConfirmStep();dsExecute();closeImport();openDataSafety()");
+  const genBefore = run(c, 'DS.gen'); scr = run(c, 'renderDataSafety()');
+  ok('(setup) two restores made generations 2 and 3; the oldest one can now be deleted', genBefore === 3 && run(c, 'dsCanDelete(1)') === true && scr.includes('dsDeleteStep(1)'));
+  ok('DELETE is visually distinct (danger style) and not armed until tapped', /class="pill-btn danger " onclick="dsDeleteStep\(1\)">DELETE</.test(scr) && /class="pill-btn" onclick="dsRestoreGen\(0\)">RESTORE</.test(scr));
+  const delSnap = J(c.store); run(c, 'dsDeleteStep(1)'); scr = run(c, 'renderDataSafety()');
+  ok('first tap on DELETE only arms it (TAP AGAIN TO DELETE) and deletes nothing', scr.includes('TAP AGAIN TO DELETE') && /pill-btn danger armed/.test(scr) && J(c.store) === delSnap);
+  run(c, "dsNav('quarantine');dsBack()"); ok('leaving the view disarms it, so a stray tap later cannot delete', !run(c, 'renderDataSafety()').includes('TAP AGAIN TO DELETE') && J(c.store) === delSnap);
+
+  // ---- layout rules in the stylesheet (the RESTORE button no longer takes the height of the card) ----
+  const css10 = fs.readFileSync(path.join(ROOT, 'style.css'), 'utf8'), ds10 = css10.slice(css10.indexOf('Data Safety full screen (phase 3.1A'));
+  ok('CSS: RESTORE/DELETE pills in a generation row have a fixed, small size (no flex-basis, no growth) and theme variables only', /\.ds-actions \.pill-btn \{[^}]*flex: 0 0 auto;[^}]*min-height: 32px/.test(ds10) && !/flex: 1 1/.test(ds10) && !/#[0-9a-fA-F]{3,8}\b/.test(ds10) && !/env\(safe-area/.test(ds10));
+  ok('CSS: danger and armed states exist for the destructive pill', /\.pill-btn\.danger \{/.test(ds10) && /\.pill-btn\.danger\.armed \{/.test(ds10));
 }
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed' + (GEN_VIEW ? '  (Phase 2 sections AFTER the migration)' : '  (Phase 2 sections before the migration + Data Safety sections)'));
